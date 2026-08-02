@@ -19,16 +19,17 @@
 #include <fstream>
 #include <sstream>
 
-namespace {
-    // Mirrors the shape written to disk; kept separate from the live PartyLogPlugin::PartyMember
-    // only in name, not in fields, so it round-trips with glaze without any custom hooks.
-    struct LogEntry {
-        uint32_t utc_start = 0;
-        uint32_t map_id = 0;
-        std::string character_name;
-        std::vector<PartyLogPlugin::PartyMember> party_members;
-    };
+// Mirrors the shape written to disk; kept separate from the live PartyLogPlugin::PartyMember only in
+// name, not in fields. Needs external linkage (i.e. can't live in an anonymous namespace) — glaze's
+// reflection generates a stable name per type and errors (C7631) on internal-linkage types.
+struct LogEntry {
+    uint32_t utc_start = 0;
+    uint32_t map_id = 0;
+    std::string character_name;
+    std::vector<PartyLogPlugin::PartyMember> party_members;
+};
 
+namespace {
     std::filesystem::path GetRunsFolder()
     {
         std::filesystem::path computer_name;
@@ -191,7 +192,9 @@ void PartyLogPlugin::WriteLogEntry()
             std::stringstream ss;
             ss << in.rdbuf();
             constexpr glz::opts opts{.error_on_unknown_keys = false};
-            glz::read<opts>(entries, ss.str());
+            if (const auto read_ec = glz::read<opts>(entries, ss.str()); read_ec) {
+                entries.clear(); // don't trust partially-parsed data on error
+            }
         }
 
         // Replace any earlier entry for the same run (e.g. a district hop re-firing InstanceLoadInfo).

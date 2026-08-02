@@ -54,3 +54,8 @@ macro(add_tb_plugin PLUGIN)
 endmacro()
 
 add_tb_plugin(ExamplePlugin)
+
+add_tb_plugin(PartyLogPlugin)
+# Core (PathGetDocumentsPath/PathGetComputerName) so the plugin writes into the same
+# Documents\GWToolboxpp\<computer>\runs folder GWToolboxdll uses, without linking GWToolboxdll internals.
+target_link_libraries(PartyLogPlugin PRIVATE Core)

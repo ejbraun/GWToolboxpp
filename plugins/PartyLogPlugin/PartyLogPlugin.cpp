@@ -89,27 +89,43 @@ void PartyLogPlugin::OnInstanceLoadInfo(const uint32_t map_id, const bool is_exp
     if (!is_explorable) {
         return;
     }
-    capture_pending = true;
-    pending_utc_start = static_cast<uint32_t>(time(nullptr));
-    pending_map_id = map_id;
-    pending_character_name.clear();
+    next_utc_start = static_cast<uint32_t>(time(nullptr));
+    next_map_id = map_id;
+    next_character_name.clear();
     if (const GW::CharContext* cc = GW::GetCharContext()) {
-        pending_character_name = PluginUtils::WStringToString(cc->player_name);
+        next_character_name = PluginUtils::WStringToString(cc->player_name);
     }
-    party_members.clear();
-    party_member_enc_names.clear();
+    restart_requested = true;
 }
 
 void PartyLogPlugin::Update(float)
 {
-    if (!capture_pending) {
-        return;
-    }
     CaptureParty();
 }
 
 void PartyLogPlugin::CaptureParty()
 {
+    if (restart_requested) {
+        // Only safe to tear down the previous run's EncStrings once none are still mid-decode -
+        // destroying one while GW::UI::AsyncDecodeStr's callback is still pending is a use-after-free.
+        for (const auto& enc : party_member_enc_names) {
+            if (enc->IsDecoding()) {
+                return; // let the old capture's decodes finish before starting the new one
+            }
+        }
+        party_members.clear();
+        party_member_enc_names.clear();
+        pending_utc_start = next_utc_start;
+        pending_map_id = next_map_id;
+        pending_character_name = next_character_name;
+        restart_requested = false;
+        active_capture = true;
+    }
+
+    if (!active_capture) {
+        return;
+    }
+
     if (!party_member_enc_names.empty()) {
         // Waiting on names queued last pass to finish decoding.
         for (const auto& enc : party_member_enc_names) {
@@ -121,7 +137,7 @@ void PartyLogPlugin::CaptureParty()
             party_members[i].name = party_member_enc_names[i]->string();
         }
         party_member_enc_names.clear();
-        capture_pending = false;
+        active_capture = false;
         WriteLogEntry();
         return;
     }
@@ -169,7 +185,7 @@ void PartyLogPlugin::CaptureParty()
     }
 
     if (party_members.empty()) {
-        capture_pending = false; // no party info found; nothing to log
+        active_capture = false; // no party info found; nothing to log
     }
 }
 

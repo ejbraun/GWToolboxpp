@@ -40,7 +40,16 @@ private:
     void CaptureParty();
     void WriteLogEntry();
 
-    bool capture_pending = false;
+    // PluginUtils::EncString has no safe way to detach from a pending GW::UI::AsyncDecodeStr callback
+    // before destruction (unlike GWToolboxdll's internal GuiUtils::EncString, which has AbandonDecode()).
+    // So a new run's capture can only start once every in-flight EncString from the previous one has
+    // finished decoding — restart_requested + next_* stage the new run until that's safe.
+    bool restart_requested = false;
+    uint32_t next_utc_start = 0;
+    uint32_t next_map_id = 0;
+    std::string next_character_name;
+
+    bool active_capture = false;
     uint32_t pending_utc_start = 0;
     uint32_t pending_map_id = 0;
     std::string pending_character_name;

@@ -54,6 +54,12 @@ public:
     };
 
 private:
+    // Only tracks instances GWToolboxdll's own ObjectiveTimerWindow would create an ObjectiveSet for
+    // (see kTrackedMapIds) - skips capture/hooks entirely for everything else (random missions,
+    // vanquishes, etc.), so the sync queue never fills up with entries that can never find a matching
+    // objective log. DoA is deliberately excluded: it's not in ObjectiveTimerWindow's map_id switch at
+    // all (it's gated on a different packet's map_fileID, since DoA shares its map_id with the solo
+    // Mallyx mission) - out of scope here per explicit instruction.
     void OnInstanceLoadInfo(uint32_t map_id, bool is_explorable);
     void OnGameSrvTransfer();
     void OnPartyDefeated();

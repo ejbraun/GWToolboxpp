@@ -173,11 +173,11 @@ void PartyLogPlugin::OnGameSrvTransfer()
         return; // party capture never completed for this run; nothing worth logging
     }
 
+    // Checked before wipe_detected: resign is the more specific signal (every connected player
+    // individually confirmed via their own "has resigned" chat message), whereas PartyDefeated
+    // appears to also fire when the whole party resigns, not just on an actual death-wipe.
     std::string end_reason = "unknown";
-    if (wipe_detected) {
-        end_reason = "wipe";
-    }
-    else if (const GW::PartyInfo* info = GW::PartyMgr::GetPartyInfo()) {
+    if (const GW::PartyInfo* info = GW::PartyMgr::GetPartyInfo()) {
         bool any_connected = false;
         bool all_resigned = true;
         for (const auto& player : info->players) {
@@ -193,6 +193,9 @@ void PartyLogPlugin::OnGameSrvTransfer()
         if (any_connected && all_resigned) {
             end_reason = "resign";
         }
+    }
+    if (end_reason == "unknown" && wipe_detected) {
+        end_reason = "wipe";
     }
     WriteLogEntry(end_reason);
 }

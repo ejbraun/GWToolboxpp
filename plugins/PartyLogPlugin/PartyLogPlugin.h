@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 // Logs the party's composition (players/heroes/henchmen + professions) whenever the player enters
@@ -37,8 +38,11 @@ public:
 
 private:
     void OnInstanceLoadInfo(uint32_t map_id, bool is_explorable);
+    void OnGameSrvTransfer();
+    void OnPartyDefeated();
+    void OnWriteToChatLog(const wchar_t* message);
     void CaptureParty();
-    void WriteLogEntry();
+    void WriteLogEntry(const std::string& end_reason);
 
     // PluginUtils::EncString has no safe way to detach from a pending GW::UI::AsyncDecodeStr callback
     // before destruction (unlike GWToolboxdll's internal GuiUtils::EncString, which has AbandonDecode()).
@@ -56,7 +60,17 @@ private:
     std::vector<PartyMember> party_members;
     std::vector<std::unique_ptr<PluginUtils::EncString>> party_member_enc_names;
 
+    // Run outcome tracking: reset on every run start (OnInstanceLoadInfo), finalized and logged when the
+    // run ends (OnGameSrvTransfer). The actual write is deferred to run-end rather than capture-completion
+    // so the log entry can record how the run finished.
+    bool run_active = false;
+    bool wipe_detected = false;
+    std::unordered_set<uint32_t> resigned_login_numbers;
+
     uint32_t last_written_utc_start = 0; // for DrawSettings status display only
 
     GW::HookEntry InstanceLoadInfo_HookEntry;
+    GW::HookEntry GameSrvTransfer_HookEntry;
+    GW::HookEntry PartyDefeated_HookEntry;
+    GW::HookEntry WriteToChatLog_HookEntry;
 };

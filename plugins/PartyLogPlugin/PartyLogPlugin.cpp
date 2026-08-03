@@ -3,6 +3,7 @@
 #include <Path.h> // Core: PathGetDocumentsPath / PathGetComputerName
 
 #include <GWCA/Constants/Constants.h>
+#include <GWCA/Constants/UIMessages.h>
 #include <GWCA/Context/CharContext.h>
 #include <GWCA/GameEntities/Agent.h>
 #include <GWCA/GameEntities/Party.h>
@@ -11,6 +12,7 @@
 #include <GWCA/Managers/PartyMgr.h>
 #include <GWCA/Managers/PlayerMgr.h>
 #include <GWCA/Managers/StoCMgr.h>
+#include <GWCA/Managers/UIMgr.h>
 #include <GWCA/Packets/StoC.h>
 
 #include <glaze/glaze.hpp>
@@ -26,6 +28,7 @@ struct LogEntry {
     uint32_t utc_start = 0;
     uint32_t map_id = 0;
     std::string character_name;
+    std::string end_reason; // "wipe", "resign", or "unknown"
     std::vector<PartyLogPlugin::PartyMember> party_members;
 };
 
@@ -58,6 +61,12 @@ namespace {
                  timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday);
         return folder / filename;
     }
+
+    // Encoded prefix for the "<player> has resigned." system chat message. Not human-readable text -
+    // it's GW's fixed per-template control-code sequence, so it matches regardless of the client's
+    // display language (only the decoded text varies by language, not the encoded template id). Same
+    // bytes GWToolboxdll's own ResignLogModule matches on.
+    constexpr wchar_t kResignedPrefix[] = L"\x7BFF\xC9C4\xAEAA\x1B9B\x107";
 }
 
 DLLAPI ToolboxPlugin* ToolboxPluginInstance()
@@ -76,10 +85,25 @@ void PartyLogPlugin::Initialize(ImGuiContext* ctx, const ImGuiAllocFns allocator
             OnInstanceLoadInfo(packet->map_id, packet->is_explorable != 0);
         },
         1);
+    GW::StoC::RegisterPacketCallback<GW::Packet::StoC::GameSrvTransfer>(
+        &GameSrvTransfer_HookEntry,
+        [this](GW::HookStatus*, GW::Packet::StoC::GameSrvTransfer*) { OnGameSrvTransfer(); });
+    GW::StoC::RegisterPacketCallback<GW::Packet::StoC::PartyDefeated>(
+        &PartyDefeated_HookEntry,
+        [this](GW::HookStatus*, GW::Packet::StoC::PartyDefeated*) { OnPartyDefeated(); });
+    GW::UI::RegisterUIMessageCallback(
+        &WriteToChatLog_HookEntry, GW::UI::UIMessage::kWriteToChatLog,
+        [this](GW::HookStatus*, GW::UI::UIMessage, void* wParam, void*) {
+            OnWriteToChatLog(static_cast<GW::UI::UIPacket::kWriteToChatLog*>(wParam)->message);
+        },
+        0x8000);
 }
 
 void PartyLogPlugin::Terminate()
 {
+    GW::UI::RemoveUIMessageCallback(&WriteToChatLog_HookEntry, GW::UI::UIMessage::kWriteToChatLog);
+    GW::StoC::RemoveCallback<GW::Packet::StoC::PartyDefeated>(&PartyDefeated_HookEntry);
+    GW::StoC::RemoveCallback<GW::Packet::StoC::GameSrvTransfer>(&GameSrvTransfer_HookEntry);
     GW::StoC::RemoveCallback<GW::Packet::StoC::InstanceLoadInfo>(&InstanceLoadInfo_HookEntry);
     ToolboxPlugin::Terminate();
 }
@@ -96,6 +120,78 @@ void PartyLogPlugin::OnInstanceLoadInfo(const uint32_t map_id, const bool is_exp
         next_character_name = PluginUtils::WStringToString(cc->player_name);
     }
     restart_requested = true;
+
+    run_active = true;
+    wipe_detected = false;
+    resigned_login_numbers.clear();
+}
+
+void PartyLogPlugin::OnPartyDefeated()
+{
+    if (!run_active) {
+        return;
+    }
+    wipe_detected = true;
+}
+
+void PartyLogPlugin::OnWriteToChatLog(const wchar_t* message)
+{
+    if (!run_active || !message || wmemcmp(message, kResignedPrefix, 5) != 0) {
+        return;
+    }
+    const std::wstring resigned_name = PluginUtils::GetPlayerNameFromEncodedString(message);
+    if (resigned_name.empty()) {
+        return;
+    }
+    const GW::PartyInfo* info = GW::PartyMgr::GetPartyInfo();
+    if (!info) {
+        return;
+    }
+    for (const auto& player : info->players) {
+        const wchar_t* name_ptr = GW::PlayerMgr::GetPlayerName(player.login_number);
+        if (!name_ptr) {
+            continue;
+        }
+        if (PluginUtils::SanitizePlayerName(name_ptr) == resigned_name) {
+            resigned_login_numbers.insert(player.login_number);
+            return;
+        }
+    }
+}
+
+void PartyLogPlugin::OnGameSrvTransfer()
+{
+    if (!run_active) {
+        return;
+    }
+    run_active = false;
+
+    if (restart_requested || active_capture || party_members.empty()) {
+        return; // party capture never completed for this run; nothing worth logging
+    }
+
+    std::string end_reason = "unknown";
+    if (wipe_detected) {
+        end_reason = "wipe";
+    }
+    else if (const GW::PartyInfo* info = GW::PartyMgr::GetPartyInfo()) {
+        bool any_connected = false;
+        bool all_resigned = true;
+        for (const auto& player : info->players) {
+            if (!player.connected()) {
+                continue;
+            }
+            any_connected = true;
+            if (!resigned_login_numbers.contains(player.login_number)) {
+                all_resigned = false;
+                break;
+            }
+        }
+        if (any_connected && all_resigned) {
+            end_reason = "resign";
+        }
+    }
+    WriteLogEntry(end_reason);
 }
 
 void PartyLogPlugin::Update(float)
@@ -138,8 +234,7 @@ void PartyLogPlugin::CaptureParty()
         }
         party_member_enc_names.clear();
         active_capture = false;
-        WriteLogEntry();
-        return;
+        return; // logged at run end (OnGameSrvTransfer), once the outcome is known
     }
 
     const GW::PartyInfo* info = GW::PartyMgr::GetPartyInfo();
@@ -189,7 +284,7 @@ void PartyLogPlugin::CaptureParty()
     }
 }
 
-void PartyLogPlugin::WriteLogEntry()
+void PartyLogPlugin::WriteLogEntry(const std::string& end_reason)
 {
     if (party_members.empty()) {
         return;
@@ -221,6 +316,7 @@ void PartyLogPlugin::WriteLogEntry()
             .utc_start = pending_utc_start,
             .map_id = pending_map_id,
             .character_name = pending_character_name,
+            .end_reason = end_reason,
             .party_members = party_members,
         });
 
@@ -237,9 +333,10 @@ void PartyLogPlugin::WriteLogEntry()
 void PartyLogPlugin::DrawSettings()
 {
     ImGui::TextWrapped(
-        "Writes party composition (players/heroes/henchmen + professions) for each explorable-area "
-        "run to PartyLog_YYYY-MM-DD.json in your GWToolbox runs folder, keyed by UTC start time so it "
-        "can be joined against GWToolboxdll's own ObjectiveTimerRuns_*.json files.");
+        "Writes party composition (players/heroes/henchmen + professions) and how the run ended "
+        "(wipe/resign/unknown) for each explorable-area run to PartyLog_YYYY-MM-DD.json in your "
+        "GWToolbox runs folder, keyed by UTC start time so it can be joined against GWToolboxdll's "
+        "own ObjectiveTimerRuns_*.json files.");
     if (last_written_utc_start) {
         std::string time_str;
         PluginUtils::TimeToString(last_written_utc_start, time_str);

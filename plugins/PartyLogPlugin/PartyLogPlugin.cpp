@@ -129,21 +129,42 @@ namespace {
 
     // Looks for a GWToolboxdll objective run matching utc_start, in today's and yesterday's files
     // (a run can start just before UTC midnight and be written just after).
+    //
+    // Not an exact match: GWToolboxdll stamps its utc_start once InstanceLoadInfo, InstanceLoadFile,
+    // AND InstanceTimer have all arrived, while we stamp ours as soon as InstanceLoadInfo alone
+    // arrives - if those don't land in the same frame, time()'s 1-second resolution can put the two
+    // timestamps on opposite sides of a second boundary. Match the closest candidate within a small
+    // tolerance instead of requiring equality.
     bool TryReadMatchingObjectiveEntry(const uint32_t utc_start, RemoteObjectiveSet& out)
     {
+        constexpr uint32_t kMatchToleranceSec = 2;
+
+        std::vector<RemoteObjectiveSet> sets;
         for (const uint32_t candidate_ts : {utc_start, utc_start - 86400u}) {
-            std::vector<RemoteObjectiveSet> sets;
-            if (!ReadJsonArray(GetObjectiveLogFilePath(candidate_ts), sets)) {
-                continue;
-            }
-            for (auto& s : sets) {
-                if (s.utc_start == utc_start) {
-                    out = std::move(s);
-                    return true;
+            std::vector<RemoteObjectiveSet> day_sets;
+            if (ReadJsonArray(GetObjectiveLogFilePath(candidate_ts), day_sets)) {
+                for (auto& s : day_sets) {
+                    sets.push_back(std::move(s));
                 }
             }
         }
-        return false;
+
+        int best_index = -1;
+        uint32_t best_diff = kMatchToleranceSec + 1;
+        for (size_t i = 0; i < sets.size(); i++) {
+            const uint32_t diff = sets[i].utc_start > utc_start
+                ? sets[i].utc_start - utc_start
+                : utc_start - sets[i].utc_start;
+            if (diff <= kMatchToleranceSec && diff < best_diff) {
+                best_diff = diff;
+                best_index = static_cast<int>(i);
+            }
+        }
+        if (best_index < 0) {
+            return false;
+        }
+        out = std::move(sets[best_index]);
+        return true;
     }
 
     // Encoded prefix for the "<player> has resigned." system chat message. Not human-readable text -

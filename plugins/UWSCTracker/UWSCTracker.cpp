@@ -376,7 +376,8 @@ void UWSCTracker::OnGameSrvTransfer()
         end_reason = "wipe";
     }
     WriteLogEntry(pending_utc_start, pending_map_id, pending_character_name, end_reason, party_members);
-    last_queue_scan_tick = 0; // force ProcessSync to pick this up on the next tick, not the 5-minute cadence
+    // Not force-rescanning here: a freshly-written entry waits out the normal kSyncScanIntervalMs
+    // cadence like everything else, rather than jumping the queue on the very next tick.
 }
 
 void UWSCTracker::Update(float)

@@ -66,6 +66,7 @@ struct PublishPayload {
 };
 
 namespace {
+    constexpr const char* kUploadRunsPath = "upload-runs"; // player configures the base URL; path is fixed
     constexpr uint64_t kSyncScanIntervalMs = 5 * 60 * 1000;      // rescan local files for new entries
     constexpr uint64_t kObjectiveGiveUpTimeoutMs = 10 * 60 * 1000; // publish without a matched objective past this
     constexpr uint64_t kRetryBackoffMs = 60 * 1000;               // wait this long before retrying a failed publish
@@ -531,7 +532,7 @@ void PartyLogPlugin::RefreshSyncQueue()
 
 void PartyLogPlugin::ProcessSync()
 {
-    if (endpoint_url.empty() || machine_key.empty()) {
+    if (base_url.empty() || machine_key.empty()) {
         return; // publishing not configured; local PartyLog_*.json write is still the durable record
     }
 
@@ -589,8 +590,11 @@ void PartyLogPlugin::ProcessSync()
         payload.objective = std::move(objective_set);
     }
 
+    std::string url;
+    ComposeUrl(url, base_url.c_str(), kUploadRunsPath);
+
     publish_request = std::make_unique<AsyncRestClient>();
-    publish_request->SetUrl(endpoint_url.c_str());
+    publish_request->SetUrl(url.c_str());
     publish_request->SetMethod(HttpMethod::Post);
     publish_request->SetHeader("Content-Type", "application/json");
     publish_request->SetHeader("X-Machine-Key", machine_key.c_str());
@@ -607,17 +611,17 @@ void PartyLogPlugin::LoadSettings(const wchar_t* folder)
 {
     ToolboxPlugin::LoadSettings(folder);
     settings_folder = folder;
-    LoadSetting("endpoint_url", endpoint_url);
+    LoadSetting("base_url", base_url);
     LoadSetting("machine_key", machine_key);
     LoadSetting("last_persisted_utc_start", last_persisted_utc_start);
-    PluginUtils::StrCopy(endpoint_url_buf, endpoint_url.c_str(), sizeof(endpoint_url_buf));
+    PluginUtils::StrCopy(base_url_buf, base_url.c_str(), sizeof(base_url_buf));
     PluginUtils::StrCopy(machine_key_buf, machine_key.c_str(), sizeof(machine_key_buf));
 }
 
 void PartyLogPlugin::SaveSettings(const wchar_t* folder)
 {
     settings_folder = folder;
-    SaveSetting("endpoint_url", endpoint_url);
+    SaveSetting("base_url", base_url);
     SaveSetting("machine_key", machine_key);
     SaveSetting("last_persisted_utc_start", last_persisted_utc_start);
     ToolboxPlugin::SaveSettings(folder);
@@ -639,10 +643,10 @@ void PartyLogPlugin::DrawSettings()
     ImGui::Separator();
     ImGui::TextWrapped(
         "Backend sync: periodically publishes each run (party + matched objective data, once "
-        "GWToolboxdll has written it) to an endpoint, authenticated via the X-Machine-Key header. "
-        "Leave the URL blank to disable and keep local logging only.");
-    if (ImGui::InputText("Endpoint URL", endpoint_url_buf, sizeof(endpoint_url_buf))) {
-        endpoint_url = endpoint_url_buf;
+        "GWToolboxdll has written it) to <Base URL>/upload-runs, authenticated via the "
+        "X-Machine-Key header. Leave the URL blank to disable and keep local logging only.");
+    if (ImGui::InputText("Base URL", base_url_buf, sizeof(base_url_buf))) {
+        base_url = base_url_buf;
     }
     if (ImGui::InputText("Machine Key", machine_key_buf, sizeof(machine_key_buf), ImGuiInputTextFlags_Password)) {
         machine_key = machine_key_buf;

@@ -35,7 +35,10 @@ struct LogEntry {
     uint32_t utc_start = 0;
     uint32_t map_id = 0;
     std::string character_name;
-    std::string end_reason; // "wipe", "resign", or "unknown"
+    // "wipe", "resign", "completed", or "unknown". Set at run end from party/wipe signals alone
+    // ("wipe" or "resign" or "unknown"); ProcessSync later upgrades "resign"/"unknown" to "completed"
+    // once the matched GWToolboxdll objective data confirms the run actually finished.
+    std::string end_reason;
     std::vector<UWSCTracker::PartyMember> party_members;
 };
 
@@ -218,6 +221,20 @@ namespace {
         return true;
     }
 
+    // Resigning to leave after finishing a run is the normal exit mechanism, not a failure - it's
+    // indistinguishable from an actual give-up resign at classification time (OnGameSrvTransfer, which
+    // fires before GWToolboxdll has even written the objective data that would tell us which one it
+    // was). GWToolboxdll only marks an objective Failed from StopObjectives() (a wipe); under normal
+    // play every objective ends up Completed, and each area's Add*ObjectiveSet() appends its final
+    // objective (e.g. Dhuum for UW) last - so objectives.back().status == Completed is a reliable
+    // "this run actually finished" signal once we have it, checked here (ProcessSync, once the
+    // objective entry is matched) rather than at classification time.
+    constexpr uint32_t kObjectiveStatusCompleted = 2;
+    bool IsRunCompleted(const RemoteObjectiveSet& objective_set)
+    {
+        return !objective_set.objectives.empty() && objective_set.objectives.back().status == kObjectiveStatusCompleted;
+    }
+
     // Encoded prefix for the "<player> has resigned." system chat message. Not human-readable text -
     // it's GW's fixed per-template control-code sequence, so it matches regardless of the client's
     // display language (only the decoded text varies by language, not the encoded template id). Same
@@ -358,7 +375,7 @@ void UWSCTracker::OnGameSrvTransfer()
     if (end_reason == "unknown" && wipe_detected) {
         end_reason = "wipe";
     }
-    WriteLogEntry(end_reason);
+    WriteLogEntry(pending_utc_start, pending_map_id, pending_character_name, end_reason, party_members);
     last_queue_scan_tick = 0; // force ProcessSync to pick this up on the next tick, not the 5-minute cadence
 }
 
@@ -453,12 +470,16 @@ void UWSCTracker::CaptureParty()
     }
 }
 
-void UWSCTracker::WriteLogEntry(const std::string& end_reason)
+// Takes explicit parameters (rather than reading pending_* member state) so ProcessSync can also call
+// this to correct an already-written entry's end_reason once objective data reveals the true outcome
+// (see the completed-run override in ProcessSync), not just OnGameSrvTransfer for the live capture.
+void UWSCTracker::WriteLogEntry(const uint32_t utc_start, const uint32_t map_id, const std::string& character_name,
+                                 const std::string& end_reason, const std::vector<PartyMember>& members)
 {
-    if (party_members.empty()) {
+    if (members.empty()) {
         return;
     }
-    const auto path = GetLogFilePath(pending_utc_start);
+    const auto path = GetLogFilePath(utc_start);
     if (path.empty()) {
         return;
     }
@@ -477,22 +498,23 @@ void UWSCTracker::WriteLogEntry(const std::string& end_reason)
             }
         }
 
-        // Replace any earlier entry for the same run (e.g. a district hop re-firing InstanceLoadInfo).
+        // Replace any earlier entry for the same run (e.g. a district hop re-firing InstanceLoadInfo,
+        // or ProcessSync correcting a previously-written end_reason).
         std::erase_if(entries, [&](const LogEntry& e) {
-            return e.utc_start == pending_utc_start && e.character_name == pending_character_name;
+            return e.utc_start == utc_start && e.character_name == character_name;
         });
         entries.push_back(LogEntry{
-            .utc_start = pending_utc_start,
-            .map_id = pending_map_id,
-            .character_name = pending_character_name,
+            .utc_start = utc_start,
+            .map_id = map_id,
+            .character_name = character_name,
             .end_reason = end_reason,
-            .party_members = party_members,
+            .party_members = members,
         });
 
         std::ofstream out{path};
         if (out.is_open()) {
             out << glz::write_json(entries).value_or(std::string{});
-            last_written_utc_start = pending_utc_start;
+            last_written_utc_start = utc_start;
         }
     } catch (const std::exception&) {
         // Best-effort logging; nothing to do if the runs folder is unwritable.
@@ -569,12 +591,21 @@ void UWSCTracker::ProcessSync()
         return;
     }
 
-    const auto& next = sync_queue.front();
+    auto& next = sync_queue.front();
     RemoteObjectiveSet objective_set;
     const bool have_objective = TryReadMatchingObjectiveEntry(next.utc_start, objective_set);
     const bool gave_up_waiting = (now - next.first_seen_tick) >= kObjectiveGiveUpTimeoutMs;
     if (!have_objective && !gave_up_waiting) {
         return; // wait for GWToolboxdll's own file to catch up; retried next tick
+    }
+
+    // Now that we have the objective data, correct a resign/unknown classification if the run actually
+    // finished (e.g. resigning right after killing Dhuum shouldn't read as giving up). Leave "wipe" as
+    // reported - a genuine death event stays notable even in the rare case it's right after a kill.
+    // Also corrects the local PartyLog_*.json entry, not just the published payload.
+    if (have_objective && next.end_reason != "wipe" && next.end_reason != "completed" && IsRunCompleted(objective_set)) {
+        next.end_reason = "completed";
+        WriteLogEntry(next.utc_start, next.map_id, next.character_name, next.end_reason, next.party_members);
     }
 
     PublishPayload payload{
@@ -631,9 +662,9 @@ void UWSCTracker::DrawSettings()
 {
     ImGui::TextWrapped(
         "Writes party composition (players/heroes/henchmen + professions) and how the run ended "
-        "(wipe/resign/unknown) for each explorable-area run to PartyLog_YYYY-MM-DD.json in your "
-        "GWToolbox runs folder, keyed by UTC start time so it can be joined against GWToolboxdll's "
-        "own ObjectiveTimerRuns_*.json files.");
+        "(wipe/resign/completed/unknown) for each explorable-area run to PartyLog_YYYY-MM-DD.json in "
+        "your GWToolbox runs folder, keyed by UTC start time so it can be joined against "
+        "GWToolboxdll's own ObjectiveTimerRuns_*.json files.");
     if (last_written_utc_start) {
         std::string time_str;
         PluginUtils::TimeToString(last_written_utc_start, time_str);

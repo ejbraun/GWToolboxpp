@@ -22,7 +22,7 @@
 // requiring any changes to GWToolboxdll itself:
 //
 //   - Captures who was in the party (players/heroes/henchmen + professions) and how each tracked
-//     explorable-area run ended (wipe/resign/unknown), keyed by UTC start time so it lines up with
+//     explorable-area run ended (wipe/resign/completed/unknown), keyed by UTC start time so it lines up with
 //     GWToolboxdll's own ObjectiveTimerRuns_*.json entries for the same run.
 //   - Only for instances GWToolboxdll's ObjectiveTimerWindow actually tracks (kTrackedMapIds) - random
 //     missions/vanquishes/etc. are skipped entirely, since they'd never correlate with anything.
@@ -72,7 +72,8 @@ private:
     void OnPartyDefeated();
     void OnWriteToChatLog(const wchar_t* message);
     void CaptureParty();
-    void WriteLogEntry(const std::string& end_reason);
+    void WriteLogEntry(uint32_t utc_start, uint32_t map_id, const std::string& character_name,
+                        const std::string& end_reason, const std::vector<PartyMember>& members);
 
     // PluginUtils::EncString has no safe way to detach from a pending GW::UI::AsyncDecodeStr callback
     // before destruction (unlike GWToolboxdll's internal GuiUtils::EncString, which has AbandonDecode()).

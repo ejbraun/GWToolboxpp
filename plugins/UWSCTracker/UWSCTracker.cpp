@@ -1,4 +1,4 @@
-#include "PartyLogPlugin.h"
+#include "UWSCTracker.h"
 
 #include <Path.h> // Core: PathGetDocumentsPath / PathGetComputerName
 
@@ -28,7 +28,7 @@
 #include <optional>
 #include <sstream>
 
-// Mirrors the shape written to disk; kept separate from the live PartyLogPlugin::PartyMember only in
+// Mirrors the shape written to disk; kept separate from the live UWSCTracker::PartyMember only in
 // name, not in fields. Needs external linkage (i.e. can't live in an anonymous namespace) — glaze's
 // reflection generates a stable name per type and errors (C7631) on internal-linkage types.
 struct LogEntry {
@@ -36,7 +36,7 @@ struct LogEntry {
     uint32_t map_id = 0;
     std::string character_name;
     std::string end_reason; // "wipe", "resign", or "unknown"
-    std::vector<PartyLogPlugin::PartyMember> party_members;
+    std::vector<UWSCTracker::PartyMember> party_members;
 };
 
 // Mirrors GWToolboxdll's ObjectiveTimerWindow::Objective::Serialized / ObjectiveSet::Serialized shape
@@ -227,11 +227,11 @@ namespace {
 
 DLLAPI ToolboxPlugin* ToolboxPluginInstance()
 {
-    static PartyLogPlugin instance;
+    static UWSCTracker instance;
     return &instance;
 }
 
-void PartyLogPlugin::Initialize(ImGuiContext* ctx, const ImGuiAllocFns allocator_fns, const HMODULE toolbox_dll)
+void UWSCTracker::Initialize(ImGuiContext* ctx, const ImGuiAllocFns allocator_fns, const HMODULE toolbox_dll)
 {
     ToolboxPlugin::Initialize(ctx, allocator_fns, toolbox_dll);
     // Positive altitude: triggered after the packet has been processed by the game/GWCA.
@@ -255,7 +255,7 @@ void PartyLogPlugin::Initialize(ImGuiContext* ctx, const ImGuiAllocFns allocator
         0x8000);
 }
 
-void PartyLogPlugin::Terminate()
+void UWSCTracker::Terminate()
 {
     GW::UI::RemoveUIMessageCallback(&WriteToChatLog_HookEntry, GW::UI::UIMessage::kWriteToChatLog);
     GW::StoC::RemoveCallback<GW::Packet::StoC::PartyDefeated>(&PartyDefeated_HookEntry);
@@ -264,7 +264,7 @@ void PartyLogPlugin::Terminate()
     ToolboxPlugin::Terminate();
 }
 
-void PartyLogPlugin::OnInstanceLoadInfo(const uint32_t map_id, const bool is_explorable)
+void UWSCTracker::OnInstanceLoadInfo(const uint32_t map_id, const bool is_explorable)
 {
     if (!is_explorable || !kTrackedMapIds.contains(map_id)) {
         return; // not an area ObjectiveTimerWindow tracks; skip capture entirely for this instance
@@ -290,7 +290,7 @@ void PartyLogPlugin::OnInstanceLoadInfo(const uint32_t map_id, const bool is_exp
     resigned_login_numbers.clear();
 }
 
-void PartyLogPlugin::OnPartyDefeated()
+void UWSCTracker::OnPartyDefeated()
 {
     if (!run_active) {
         return;
@@ -298,7 +298,7 @@ void PartyLogPlugin::OnPartyDefeated()
     wipe_detected = true;
 }
 
-void PartyLogPlugin::OnWriteToChatLog(const wchar_t* message)
+void UWSCTracker::OnWriteToChatLog(const wchar_t* message)
 {
     if (!run_active || !message || wmemcmp(message, kResignedPrefix, 5) != 0) {
         return;
@@ -323,7 +323,7 @@ void PartyLogPlugin::OnWriteToChatLog(const wchar_t* message)
     }
 }
 
-void PartyLogPlugin::OnGameSrvTransfer()
+void UWSCTracker::OnGameSrvTransfer()
 {
     if (!run_active) {
         return;
@@ -362,13 +362,13 @@ void PartyLogPlugin::OnGameSrvTransfer()
     last_queue_scan_tick = 0; // force ProcessSync to pick this up on the next tick, not the 5-minute cadence
 }
 
-void PartyLogPlugin::Update(float)
+void UWSCTracker::Update(float)
 {
     CaptureParty();
     ProcessSync();
 }
 
-void PartyLogPlugin::CaptureParty()
+void UWSCTracker::CaptureParty()
 {
     if (restart_requested) {
         // Only safe to tear down the previous run's EncStrings once none are still mid-decode -
@@ -421,7 +421,7 @@ void PartyLogPlugin::CaptureParty()
                 secondary = static_cast<uint32_t>(living->secondary);
             }
         }
-        party_members.push_back(PartyLogPlugin::PartyMember{
+        party_members.push_back(UWSCTracker::PartyMember{
             .primary = primary,
             .secondary = secondary,
             .is_player = is_player,
@@ -453,7 +453,7 @@ void PartyLogPlugin::CaptureParty()
     }
 }
 
-void PartyLogPlugin::WriteLogEntry(const std::string& end_reason)
+void UWSCTracker::WriteLogEntry(const std::string& end_reason)
 {
     if (party_members.empty()) {
         return;
@@ -499,7 +499,7 @@ void PartyLogPlugin::WriteLogEntry(const std::string& end_reason)
     }
 }
 
-void PartyLogPlugin::RefreshSyncQueue()
+void UWSCTracker::RefreshSyncQueue()
 {
     std::unordered_set<uint32_t> already_queued;
     for (const auto& q : sync_queue) {
@@ -530,7 +530,7 @@ void PartyLogPlugin::RefreshSyncQueue()
     std::ranges::sort(sync_queue, {}, &SyncQueueEntry::utc_start);
 }
 
-void PartyLogPlugin::ProcessSync()
+void UWSCTracker::ProcessSync()
 {
     if (base_url.empty() || machine_key.empty()) {
         return; // publishing not configured; local PartyLog_*.json write is still the durable record
@@ -607,7 +607,7 @@ void PartyLogPlugin::ProcessSync()
     publish_request->ExecuteAsync();
 }
 
-void PartyLogPlugin::LoadSettings(const wchar_t* folder)
+void UWSCTracker::LoadSettings(const wchar_t* folder)
 {
     ToolboxPlugin::LoadSettings(folder);
     settings_folder = folder;
@@ -618,7 +618,7 @@ void PartyLogPlugin::LoadSettings(const wchar_t* folder)
     PluginUtils::StrCopy(machine_key_buf, machine_key.c_str(), sizeof(machine_key_buf));
 }
 
-void PartyLogPlugin::SaveSettings(const wchar_t* folder)
+void UWSCTracker::SaveSettings(const wchar_t* folder)
 {
     settings_folder = folder;
     SaveSetting("base_url", base_url);
@@ -627,7 +627,7 @@ void PartyLogPlugin::SaveSettings(const wchar_t* folder)
     ToolboxPlugin::SaveSettings(folder);
 }
 
-void PartyLogPlugin::DrawSettings()
+void UWSCTracker::DrawSettings()
 {
     ImGui::TextWrapped(
         "Writes party composition (players/heroes/henchmen + professions) and how the run ended "

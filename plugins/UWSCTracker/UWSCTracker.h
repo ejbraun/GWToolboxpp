@@ -5,7 +5,7 @@
 
 #include <GWCA/Utilities/Hook.h>
 
-// unique_ptr<AsyncRestClient> below needs the complete type: ~PartyLogPlugin() is defaulted inline in
+// unique_ptr<AsyncRestClient> below needs the complete type: ~UWSCTracker() is defaulted inline in
 // this header, so unique_ptr's deleter is instantiated here too, not just where AsyncRestClient is used.
 #include <RestClient.h>
 
@@ -15,22 +15,29 @@
 #include <unordered_set>
 #include <vector>
 
-// Logs the party's composition (players/heroes/henchmen + professions) and how each explorable-area
-// run ended (wipe/resign/unknown), keyed by UTC start time so it can be joined against GWToolboxdll's
-// own runs/ObjectiveTimerRuns_*.json files without needing any changes to GWToolboxdll itself.
+// Client-side data collection for a GW1 speedclear run tracker (Go backend, Postgres, React frontend):
+// this plugin is the thing that actually runs inside the game and feeds that backend. GWToolboxdll's
+// own Objective Timer already records per-run timing/objective data (runs/ObjectiveTimerRuns_*.json),
+// but has no concept of party composition or how a run ended - this plugin fills that gap without
+// requiring any changes to GWToolboxdll itself:
 //
-// Also syncs both to a configurable backend endpoint: a periodic sweep (SyncQueueEntry) reads the
-// local PartyLog_*.json / ObjectiveTimerRuns_*.json files - the durable source of truth, written
-// regardless of network state - for anything past last_persisted_utc_start, and publishes oldest
-// first, only advancing the watermark on confirmed success. This means a slow GWToolboxdll write, a
-// network blip, or the game closing mid-publish just gets retried/caught up on a later sweep instead
-// of being lost.
-class PartyLogPlugin : public ToolboxPlugin {
+//   - Captures who was in the party (players/heroes/henchmen + professions) and how each tracked
+//     explorable-area run ended (wipe/resign/unknown), keyed by UTC start time so it lines up with
+//     GWToolboxdll's own ObjectiveTimerRuns_*.json entries for the same run.
+//   - Only for instances GWToolboxdll's ObjectiveTimerWindow actually tracks (kTrackedMapIds) - random
+//     missions/vanquishes/etc. are skipped entirely, since they'd never correlate with anything.
+//   - Periodically (SyncQueueEntry) reads both its own local PartyLog_*.json and GWToolboxdll's
+//     ObjectiveTimerRuns_*.json - the durable, network-independent source of truth - and publishes the
+//     combined party+objective payload for each run to the backend, machine-key authenticated. Only
+//     advances the persisted watermark on confirmed success, so a slow GWToolboxdll write, a network
+//     blip, or the game closing mid-publish just gets retried/caught up on a later sweep instead of
+//     losing data or double-reporting a run.
+class UWSCTracker : public ToolboxPlugin {
 public:
-    PartyLogPlugin() = default;
-    ~PartyLogPlugin() override = default;
+    UWSCTracker() = default;
+    ~UWSCTracker() override = default;
 
-    const char* Name() const override { return "Party Log Plugin"; }
+    const char* Name() const override { return "UWSCTracker"; }
 
     [[nodiscard]] bool HasSettings() const override { return true; }
     void DrawSettings() override;

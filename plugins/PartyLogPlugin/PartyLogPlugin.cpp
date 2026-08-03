@@ -3,7 +3,6 @@
 #include <Path.h> // Core: PathGetDocumentsPath / PathGetComputerName
 
 #include <GWCA/Constants/Constants.h>
-#include <GWCA/Constants/UIMessages.h>
 #include <GWCA/Context/CharContext.h>
 #include <GWCA/GameEntities/Agent.h>
 #include <GWCA/GameEntities/Party.h>
@@ -12,6 +11,10 @@
 #include <GWCA/Managers/PartyMgr.h>
 #include <GWCA/Managers/PlayerMgr.h>
 #include <GWCA/Managers/StoCMgr.h>
+// GWCA/Constants/UIMessages.h has no include guard - don't include it directly. UIMgr.h (which does
+// have one) already pulls it in internally; including both causes its content to be pasted twice in
+// this TU, which corrupts parsing for the rest of that file and shows up as bogus "undeclared
+// identifier"/"undefined type" errors for symbols defined later in it.
 #include <GWCA/Managers/UIMgr.h>
 #include <GWCA/Packets/StoC.h>
 

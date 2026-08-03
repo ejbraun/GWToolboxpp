@@ -5,14 +5,26 @@
 
 #include <GWCA/Utilities/Hook.h>
 
+// unique_ptr<AsyncRestClient> below needs the complete type: ~PartyLogPlugin() is defaulted inline in
+// this header, so unique_ptr's deleter is instantiated here too, not just where AsyncRestClient is used.
+#include <RestClient.h>
+
+#include <deque>
 #include <memory>
 #include <string>
 #include <unordered_set>
 #include <vector>
 
-// Logs the party's composition (players/heroes/henchmen + professions) whenever the player enters
-// an explorable area, keyed by UTC start time so it can be joined against GWToolboxdll's own
-// runs/ObjectiveTimerRuns_*.json files without needing any changes to GWToolboxdll itself.
+// Logs the party's composition (players/heroes/henchmen + professions) and how each explorable-area
+// run ended (wipe/resign/unknown), keyed by UTC start time so it can be joined against GWToolboxdll's
+// own runs/ObjectiveTimerRuns_*.json files without needing any changes to GWToolboxdll itself.
+//
+// Also syncs both to a configurable backend endpoint: a periodic sweep (SyncQueueEntry) reads the
+// local PartyLog_*.json / ObjectiveTimerRuns_*.json files - the durable source of truth, written
+// regardless of network state - for anything past last_persisted_utc_start, and publishes oldest
+// first, only advancing the watermark on confirmed success. This means a slow GWToolboxdll write, a
+// network blip, or the game closing mid-publish just gets retried/caught up on a later sweep instead
+// of being lost.
 class PartyLogPlugin : public ToolboxPlugin {
 public:
     PartyLogPlugin() = default;
@@ -22,10 +34,15 @@ public:
 
     [[nodiscard]] bool HasSettings() const override { return true; }
     void DrawSettings() override;
+    void LoadSettings(const wchar_t* folder) override;
+    void SaveSettings(const wchar_t* folder) override;
 
     void Initialize(ImGuiContext* ctx, ImGuiAllocFns allocator_fns, HMODULE toolbox_dll) override;
     void Terminate() override;
     void Update(float delta) override;
+    // Destroying an in-flight publish_request blocks (joins the background HTTP thread); deferring
+    // unload until it's done avoids freezing the host UI on plugin disable.
+    bool CanTerminate() override { return !publish_request || publish_request->IsCompleted(); }
 
     struct PartyMember {
         std::string name;
@@ -73,4 +90,32 @@ private:
     GW::HookEntry GameSrvTransfer_HookEntry;
     GW::HookEntry PartyDefeated_HookEntry;
     GW::HookEntry WriteToChatLog_HookEntry;
+
+    // --- Backend sync ---
+    void ProcessSync();
+    void RefreshSyncQueue();
+
+    std::string endpoint_url;
+    std::string machine_key;
+    char endpoint_url_buf[256] = "";
+    char machine_key_buf[128] = "";
+
+    uint32_t last_persisted_utc_start = 0; // persisted setting; watermark, only advances on confirmed publish
+    std::wstring settings_folder;          // cached from LoadSettings/SaveSettings so a successful publish
+                                            // can persist the advanced watermark immediately, not just on
+                                            // whatever cadence the host calls SaveSettings.
+
+    struct SyncQueueEntry {
+        uint32_t utc_start = 0;
+        uint32_t map_id = 0;
+        std::string character_name;
+        std::string end_reason;
+        std::vector<PartyMember> party_members;
+        uint64_t first_seen_tick = 0; // GetTickCount64() when first queued; for the give-up-waiting timeout
+    };
+    std::deque<SyncQueueEntry> sync_queue;
+    std::unique_ptr<AsyncRestClient> publish_request;
+    uint32_t publishing_utc_start = 0; // utc_start of the entry publish_request is currently sending
+    uint64_t last_queue_scan_tick = 0;
+    uint64_t last_publish_attempt_tick = 0; // backoff timer, only advanced on a failed publish
 };

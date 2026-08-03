@@ -22,6 +22,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
 
 // Mirrors the shape written to disk; kept separate from the live PartyLogPlugin::PartyMember only in
@@ -35,7 +36,37 @@ struct LogEntry {
     std::vector<PartyLogPlugin::PartyMember> party_members;
 };
 
+// Mirrors GWToolboxdll's ObjectiveTimerWindow::Objective::Serialized / ObjectiveSet::Serialized shape
+// (Windows/ObjectiveTimerWindow.h) closely enough to read its runs/ObjectiveTimerRuns_*.json - can't
+// include that header directly (internal to GWToolboxdll, not part of the exported plugin surface, and
+// pulls in unrelated heavy deps like uWebSockets). Also needs external linkage, same reason as LogEntry.
+struct RemoteObjective {
+    std::string name;
+    uint32_t status = 0; // 0=NotStarted, 1=Started, 2=Completed, 3=Failed
+    uint32_t start = 0;
+    uint32_t done = 0;
+    std::optional<uint32_t> indent;
+    std::optional<uint32_t> duration;
+};
+struct RemoteObjectiveSet {
+    std::string name;
+    uint32_t instance_start = 0;
+    uint32_t utc_start = 0;
+    std::vector<RemoteObjective> objectives;
+    std::optional<uint32_t> duration;
+};
+
+// Body for the backend publish request.
+struct PublishPayload {
+    LogEntry party;
+    std::optional<RemoteObjectiveSet> objective;
+};
+
 namespace {
+    constexpr uint64_t kSyncScanIntervalMs = 5 * 60 * 1000;      // rescan local files for new entries
+    constexpr uint64_t kObjectiveGiveUpTimeoutMs = 10 * 60 * 1000; // publish without a matched objective past this
+    constexpr uint64_t kRetryBackoffMs = 60 * 1000;               // wait this long before retrying a failed publish
+
     std::filesystem::path GetRunsFolder()
     {
         std::filesystem::path computer_name;
@@ -63,6 +94,56 @@ namespace {
         swprintf(filename, _countof(filename), L"PartyLog_%04d-%02d-%02d.json",
                  timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday);
         return folder / filename;
+    }
+
+    // GWToolboxdll's own file for the same UTC day (ObjectiveTimerWindow::SaveRuns, same gmtime bucketing).
+    std::filesystem::path GetObjectiveLogFilePath(const uint32_t utc_start)
+    {
+        const auto folder = GetRunsFolder();
+        if (folder.empty()) {
+            return {};
+        }
+        const time_t tt = utc_start;
+        const tm* timeinfo = gmtime(&tt);
+        if (!timeinfo) {
+            return {};
+        }
+        wchar_t filename[48];
+        swprintf(filename, _countof(filename), L"ObjectiveTimerRuns_%04d-%02d-%02d.json",
+                 timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday);
+        return folder / filename;
+    }
+
+    template <typename T>
+    bool ReadJsonArray(const std::filesystem::path& path, std::vector<T>& out)
+    {
+        std::ifstream in{path};
+        if (!in.is_open()) {
+            return false;
+        }
+        std::stringstream ss;
+        ss << in.rdbuf();
+        constexpr glz::opts opts{.error_on_unknown_keys = false};
+        return !glz::read<opts>(out, ss.str());
+    }
+
+    // Looks for a GWToolboxdll objective run matching utc_start, in today's and yesterday's files
+    // (a run can start just before UTC midnight and be written just after).
+    bool TryReadMatchingObjectiveEntry(const uint32_t utc_start, RemoteObjectiveSet& out)
+    {
+        for (const uint32_t candidate_ts : {utc_start, utc_start - 86400u}) {
+            std::vector<RemoteObjectiveSet> sets;
+            if (!ReadJsonArray(GetObjectiveLogFilePath(candidate_ts), sets)) {
+                continue;
+            }
+            for (auto& s : sets) {
+                if (s.utc_start == utc_start) {
+                    out = std::move(s);
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     // Encoded prefix for the "<player> has resigned." system chat message. Not human-readable text -
@@ -198,11 +279,13 @@ void PartyLogPlugin::OnGameSrvTransfer()
         end_reason = "wipe";
     }
     WriteLogEntry(end_reason);
+    last_queue_scan_tick = 0; // force ProcessSync to pick this up on the next tick, not the 5-minute cadence
 }
 
 void PartyLogPlugin::Update(float)
 {
     CaptureParty();
+    ProcessSync();
 }
 
 void PartyLogPlugin::CaptureParty()
@@ -336,6 +419,131 @@ void PartyLogPlugin::WriteLogEntry(const std::string& end_reason)
     }
 }
 
+void PartyLogPlugin::RefreshSyncQueue()
+{
+    std::unordered_set<uint32_t> already_queued;
+    for (const auto& q : sync_queue) {
+        already_queued.insert(q.utc_start);
+    }
+
+    const uint32_t now_utc = static_cast<uint32_t>(time(nullptr));
+    for (const uint32_t candidate_ts : {now_utc, now_utc - 86400u}) {
+        std::vector<LogEntry> entries;
+        if (!ReadJsonArray(GetLogFilePath(candidate_ts), entries)) {
+            continue;
+        }
+        for (auto& e : entries) {
+            if (e.utc_start > last_persisted_utc_start && !already_queued.contains(e.utc_start)) {
+                sync_queue.push_back(SyncQueueEntry{
+                    .utc_start = e.utc_start,
+                    .map_id = e.map_id,
+                    .character_name = std::move(e.character_name),
+                    .end_reason = std::move(e.end_reason),
+                    .party_members = std::move(e.party_members),
+                    .first_seen_tick = GetTickCount64(),
+                });
+                already_queued.insert(e.utc_start);
+            }
+        }
+    }
+
+    std::ranges::sort(sync_queue, {}, &SyncQueueEntry::utc_start);
+}
+
+void PartyLogPlugin::ProcessSync()
+{
+    if (endpoint_url.empty() || machine_key.empty()) {
+        return; // publishing not configured; local PartyLog_*.json write is still the durable record
+    }
+
+    const uint64_t now = GetTickCount64();
+
+    if (publish_request) {
+        if (!publish_request->IsCompleted()) {
+            return; // in flight
+        }
+        if (publish_request->IsSuccessful()) {
+            last_persisted_utc_start = publishing_utc_start;
+            if (!settings_folder.empty()) {
+                SaveSettings(settings_folder.c_str()); // persist the watermark now, not on the host's cadence
+            }
+            if (!sync_queue.empty() && sync_queue.front().utc_start == publishing_utc_start) {
+                sync_queue.pop_front();
+            }
+        }
+        else {
+            last_publish_attempt_tick = now; // back off before retrying a failed publish
+        }
+        publish_request.reset();
+    }
+
+    if (now - last_publish_attempt_tick < kRetryBackoffMs) {
+        return;
+    }
+
+    if (now - last_queue_scan_tick >= kSyncScanIntervalMs) {
+        last_queue_scan_tick = now;
+        RefreshSyncQueue();
+    }
+    if (sync_queue.empty()) {
+        return;
+    }
+
+    const auto& next = sync_queue.front();
+    RemoteObjectiveSet objective_set;
+    const bool have_objective = TryReadMatchingObjectiveEntry(next.utc_start, objective_set);
+    const bool gave_up_waiting = (now - next.first_seen_tick) >= kObjectiveGiveUpTimeoutMs;
+    if (!have_objective && !gave_up_waiting) {
+        return; // wait for GWToolboxdll's own file to catch up; retried next tick
+    }
+
+    PublishPayload payload{
+        .party = LogEntry{
+            .utc_start = next.utc_start,
+            .map_id = next.map_id,
+            .character_name = next.character_name,
+            .end_reason = next.end_reason,
+            .party_members = next.party_members,
+        },
+    };
+    if (have_objective) {
+        payload.objective = std::move(objective_set);
+    }
+
+    publish_request = std::make_unique<AsyncRestClient>();
+    publish_request->SetUrl(endpoint_url.c_str());
+    publish_request->SetMethod(HttpMethod::Post);
+    publish_request->SetHeader("Content-Type", "application/json");
+    publish_request->SetHeader("X-Machine-Key", machine_key.c_str());
+    publish_request->SetPostContent(glz::write_json(payload).value_or(std::string{}), ContentFlag::Copy);
+    publish_request->SetTimeoutSec(10);
+    publish_request->SetConnectTimeoutSec(5);
+    publish_request->SetVerifyPeer(true);
+    publish_request->SetVerifyHost(true);
+    publishing_utc_start = next.utc_start;
+    publish_request->ExecuteAsync();
+}
+
+void PartyLogPlugin::LoadSettings(const wchar_t* folder)
+{
+    ToolboxPlugin::LoadSettings(folder);
+    settings_folder = folder;
+    LoadSetting("endpoint_url", endpoint_url);
+    LoadSetting("machine_key", machine_key);
+    LoadSetting("last_persisted_utc_start", last_persisted_utc_start);
+    PluginUtils::StrCopy(endpoint_url_buf, endpoint_url.c_str(), sizeof(endpoint_url_buf));
+    PluginUtils::StrCopy(machine_key_buf, machine_key.c_str(), sizeof(machine_key_buf));
+}
+
+void PartyLogPlugin::SaveSettings(const wchar_t* folder)
+{
+    settings_folder = folder;
+    SaveSetting("endpoint_url", endpoint_url);
+    SaveSetting("machine_key", machine_key);
+    SaveSetting("last_persisted_utc_start", last_persisted_utc_start);
+    ToolboxPlugin::SaveSettings(folder);
+}
+
 void PartyLogPlugin::DrawSettings()
 {
     ImGui::TextWrapped(
@@ -347,5 +555,23 @@ void PartyLogPlugin::DrawSettings()
         std::string time_str;
         PluginUtils::TimeToString(last_written_utc_start, time_str);
         ImGui::Text("Last run logged: %s", time_str.c_str());
+    }
+
+    ImGui::Separator();
+    ImGui::TextWrapped(
+        "Backend sync: periodically publishes each run (party + matched objective data, once "
+        "GWToolboxdll has written it) to an endpoint, authenticated via the X-Machine-Key header. "
+        "Leave the URL blank to disable and keep local logging only.");
+    if (ImGui::InputText("Endpoint URL", endpoint_url_buf, sizeof(endpoint_url_buf))) {
+        endpoint_url = endpoint_url_buf;
+    }
+    if (ImGui::InputText("Machine Key", machine_key_buf, sizeof(machine_key_buf), ImGuiInputTextFlags_Password)) {
+        machine_key = machine_key_buf;
+    }
+    ImGui::Text("Sync queue: %zu pending", sync_queue.size());
+    if (last_persisted_utc_start) {
+        std::string time_str;
+        PluginUtils::TimeToString(last_persisted_utc_start, time_str);
+        ImGui::Text("Last synced run: %s", time_str.c_str());
     }
 }

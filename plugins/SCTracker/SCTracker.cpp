@@ -70,7 +70,7 @@ struct PublishPayload {
 
 namespace {
     constexpr const char* kBaseUrl = "https://gwsctracker.com";
-    constexpr const char* kUploadRunsPath = "upload-runs";
+    constexpr const char* kUploadRunsPath = "upload-run";
     constexpr uint64_t kSyncScanIntervalMs = 5 * 60 * 1000;      // rescan local files for new entries
     constexpr uint64_t kObjectiveGiveUpTimeoutMs = 10 * 60 * 1000; // publish without a matched objective past this
     constexpr uint64_t kRetryBackoffMs = 60 * 1000;               // wait this long before retrying a failed publish

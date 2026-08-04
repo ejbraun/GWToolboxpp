@@ -121,9 +121,7 @@ private:
     void ProcessSync();
     void RefreshSyncQueue();
 
-    std::string base_url; // e.g. https://api.example.com - the kUploadRunsPath suffix is hardcoded
     std::string machine_key;
-    char base_url_buf[256] = "";
     char machine_key_buf[128] = "";
 
     uint32_t last_persisted_utc_start = 0; // persisted setting; watermark, only advances on confirmed publish

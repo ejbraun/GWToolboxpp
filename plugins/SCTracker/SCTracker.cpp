@@ -4,6 +4,7 @@
 
 #include <GWCA/Constants/Constants.h>
 #include <GWCA/Constants/Maps.h>
+#include <GWCA/Constants/Skills.h>
 #include <GWCA/Context/CharContext.h>
 #include <GWCA/GameEntities/Agent.h>
 #include <GWCA/GameEntities/Map.h> // full AreaInfo/RegionType definitions; MapMgr.h only forward-declares them
@@ -268,6 +269,18 @@ namespace {
         return static_cast<uint32_t>(std::ranges::count_if(members, &SCTracker::PartyMember::is_player));
     }
 
+    // Skill -> role_hint mapping for Ranger/Assassin party members (see OnSkillUsed). Only the
+    // profession that would plausibly bring a given skill needs to be listed here; OnSkillUsed
+    // already restricts tracking to Ranger/Assassin primaries before consulting this map.
+    const std::unordered_map<uint32_t, std::string> kRoleSkills = {
+        {static_cast<uint32_t>(GW::Constants::SkillID::Finish_Him), "t1"},
+        {static_cast<uint32_t>(GW::Constants::SkillID::Shadow_Walk), "t1"},
+        {static_cast<uint32_t>(GW::Constants::SkillID::Recall), "t1"},
+        {static_cast<uint32_t>(GW::Constants::SkillID::Ebon_Escape), "t1"},
+        {static_cast<uint32_t>(GW::Constants::SkillID::Radiation_Field), "t2"},
+        {static_cast<uint32_t>(GW::Constants::SkillID::Edge_of_Extinction), "t3"},
+    };
+
     // Encoded prefix for the "<player> has resigned." system chat message. Not human-readable text -
     // it's GW's fixed per-template control-code sequence, so it matches regardless of the client's
     // display language (only the decoded text varies by language, not the encoded template id). Same
@@ -302,6 +315,39 @@ void SCTracker::Initialize(ImGuiContext* ctx, const ImGuiAllocFns allocator_fns,
         [this](GW::HookStatus*, const GW::Packet::StoC::AgentState* packet) {
             OnUpdateAgentState(packet->agent_id, packet->state);
         });
+    // Skill used on self / no target.
+    GW::StoC::RegisterPacketCallback<GW::Packet::StoC::GenericValue>(
+        &GenericValueSelf_HookEntry,
+        [this](GW::HookStatus*, const GW::Packet::StoC::GenericValue* packet) {
+            switch (packet->value_id) {
+                case GW::Packet::StoC::GenericValueID::instant_skill_activated:
+                case GW::Packet::StoC::GenericValueID::skill_activated:
+                case GW::Packet::StoC::GenericValueID::skill_finished:
+                case GW::Packet::StoC::GenericValueID::attack_skill_activated:
+                case GW::Packet::StoC::GenericValueID::attack_skill_finished:
+                    OnSkillUsed(packet->agent_id, static_cast<GW::Constants::SkillID>(packet->value));
+                    break;
+                default:
+                    break;
+            }
+        });
+    // Skill used on a target (caster is the actual user; agent_id/target field naming is reversed
+    // for this packet - see GenericValueTarget's field comments).
+    GW::StoC::RegisterPacketCallback<GW::Packet::StoC::GenericValueTarget>(
+        &GenericValueTarget_HookEntry,
+        [this](GW::HookStatus*, const GW::Packet::StoC::GenericValueTarget* packet) {
+            switch (packet->Value_id) {
+                case GW::Packet::StoC::GenericValueID::instant_skill_activated:
+                case GW::Packet::StoC::GenericValueID::skill_activated:
+                case GW::Packet::StoC::GenericValueID::skill_finished:
+                case GW::Packet::StoC::GenericValueID::attack_skill_activated:
+                case GW::Packet::StoC::GenericValueID::attack_skill_finished:
+                    OnSkillUsed(packet->caster, static_cast<GW::Constants::SkillID>(packet->value));
+                    break;
+                default:
+                    break;
+            }
+        });
     GW::UI::RegisterUIMessageCallback(
         &WriteToChatLog_HookEntry, GW::UI::UIMessage::kWriteToChatLog,
         [this](GW::HookStatus*, GW::UI::UIMessage, void* wParam, void*) {
@@ -313,6 +359,8 @@ void SCTracker::Initialize(ImGuiContext* ctx, const ImGuiAllocFns allocator_fns,
 void SCTracker::Terminate()
 {
     GW::UI::RemoveUIMessageCallback(&WriteToChatLog_HookEntry, GW::UI::UIMessage::kWriteToChatLog);
+    GW::StoC::RemoveCallback<GW::Packet::StoC::GenericValueTarget>(&GenericValueTarget_HookEntry);
+    GW::StoC::RemoveCallback<GW::Packet::StoC::GenericValue>(&GenericValueSelf_HookEntry);
     GW::StoC::RemoveCallback<GW::Packet::StoC::AgentState>(&AgentState_HookEntry);
     GW::StoC::RemoveCallback<GW::Packet::StoC::PartyDefeated>(&PartyDefeated_HookEntry);
     GW::StoC::RemoveCallback<GW::Packet::StoC::GameSrvTransfer>(&GameSrvTransfer_HookEntry);
@@ -400,6 +448,33 @@ void SCTracker::OnUpdateAgentState(const uint32_t agent_id, const uint32_t state
     if (now_dead) {
         party_members[idx].deaths++;
     }
+}
+
+// Tags a Ranger/Assassin party member's role_hint the first time they use one of kRoleSkills'
+// mapped skills. Primary profession only (a Ranger/Assassin secondary doesn't count), and
+// first-match-wins - once set, role_hint is never overwritten for the rest of the run.
+void SCTracker::OnSkillUsed(const uint32_t agent_id, const GW::Constants::SkillID skill_id)
+{
+    if (!run_active || skill_id == GW::Constants::SkillID::No_Skill) {
+        return;
+    }
+    const auto member_it = agent_id_to_party_index.find(agent_id);
+    if (member_it == agent_id_to_party_index.end()) {
+        return;
+    }
+    PartyMember& member = party_members[member_it->second];
+    if (member.role_hint.has_value()) {
+        return;
+    }
+    const auto primary = static_cast<GW::Constants::Profession>(member.primary);
+    if (primary != GW::Constants::Profession::Ranger && primary != GW::Constants::Profession::Assassin) {
+        return;
+    }
+    const auto role_it = kRoleSkills.find(static_cast<uint32_t>(skill_id));
+    if (role_it == kRoleSkills.end()) {
+        return;
+    }
+    member.role_hint = role_it->second;
 }
 
 void SCTracker::OnGameSrvTransfer()

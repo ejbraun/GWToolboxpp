@@ -11,10 +11,15 @@
 
 #include <deque>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+namespace GW::Constants {
+    enum class SkillID : uint32_t;
+}
 
 // Client-side data collection for a GW1 speedclear run tracker (Go backend, Postgres, React frontend):
 // this plugin is the thing that actually runs inside the game and feeds that backend. GWToolboxdll's
@@ -60,6 +65,9 @@ public:
         bool is_hero = false;
         bool is_henchman = false;
         uint32_t deaths = 0; // count of alive->dead transitions seen for this member during the run
+        // Set for Ranger/Assassin members (primary profession only) the first time they use one of
+        // kRoleSkills' mapped skills; never overwritten afterward. Absent for everyone else.
+        std::optional<std::string> role_hint;
     };
 
 private:
@@ -74,6 +82,7 @@ private:
     void OnPartyDefeated();
     void OnWriteToChatLog(const wchar_t* message);
     void OnUpdateAgentState(uint32_t agent_id, uint32_t state);
+    void OnSkillUsed(uint32_t agent_id, GW::Constants::SkillID skill_id);
     void CaptureParty();
     void WriteLogEntry(uint32_t utc_start, uint32_t map_id, const std::string& character_name,
                         const std::string& end_reason, const std::vector<PartyMember>& members);
@@ -116,6 +125,8 @@ private:
     GW::HookEntry PartyDefeated_HookEntry;
     GW::HookEntry WriteToChatLog_HookEntry;
     GW::HookEntry AgentState_HookEntry;
+    GW::HookEntry GenericValueSelf_HookEntry;
+    GW::HookEntry GenericValueTarget_HookEntry;
 
     // --- Backend sync ---
     void ProcessSync();

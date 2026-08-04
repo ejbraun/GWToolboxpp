@@ -654,6 +654,21 @@ void SCTracker::ProcessSync()
         return;
     }
 
+    // Only full 8-man parties are meaningful for the leaderboard backend; smaller parties are dropped
+    // from the queue without publishing (marked synced so they don't get retried forever).
+    bool skipped_any = false;
+    while (!sync_queue.empty() && sync_queue.front().party_members.size() != 8) {
+        last_persisted_utc_start = sync_queue.front().utc_start;
+        sync_queue.pop_front();
+        skipped_any = true;
+    }
+    if (skipped_any && !settings_folder.empty()) {
+        SaveSettings(settings_folder.c_str()); // persist the advanced watermark now, not on the host's cadence
+    }
+    if (sync_queue.empty()) {
+        return;
+    }
+
     auto& next = sync_queue.front();
     RemoteObjectiveSet objective_set;
     const bool have_objective = TryReadMatchingObjectiveEntry(next.utc_start, objective_set);

@@ -692,11 +692,7 @@ void SCTracker::SaveSettings(const wchar_t* folder)
 
 void SCTracker::DrawSettings()
 {
-    ImGui::TextWrapped(
-        "Writes party composition (players/heroes/henchmen + professions + death count) and how the run "
-        "ended (wipe/resign/completed/unknown) for each explorable-area run to PartyLog_YYYY-MM-DD.json "
-        "in your GWToolbox runs folder, keyed by UTC start time so it can be joined against "
-        "GWToolboxdll's own ObjectiveTimerRuns_*.json files.");
+    ImGui::TextWrapped("Logs party composition and run outcome for each speedclear run.");
     if (last_written_utc_start) {
         std::string time_str;
         PluginUtils::TimeToString(last_written_utc_start, time_str);
@@ -704,10 +700,7 @@ void SCTracker::DrawSettings()
     }
 
     ImGui::Separator();
-    ImGui::TextWrapped(
-        "Backend sync: periodically publishes each run (party + matched objective data, once "
-        "GWToolboxdll has written it) to gwsctracker.com, authenticated via the X-Machine-Key "
-        "header. Leave the key blank to disable and keep local logging only.");
+    ImGui::TextWrapped("Syncs runs to gwsctracker.com. Leave the key blank to log locally only.");
     if (ImGui::InputText("Machine Key", machine_key_buf, sizeof(machine_key_buf), ImGuiInputTextFlags_Password)) {
         machine_key = machine_key_buf;
     }

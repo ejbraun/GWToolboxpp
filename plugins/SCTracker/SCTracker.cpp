@@ -664,42 +664,48 @@ void SCTracker::ProcessSync()
         return;
     }
 
-    // Only full 8-man parties of real players are meaningful for the leaderboard backend - a solo
-    // player filling the other 7 slots with heroes/henchmen isn't a guild run, even though it still
-    // occupies all 8 party slots. Smaller/mixed parties are dropped from the queue without
-    // publishing (marked synced so they don't get retried forever).
-    bool skipped_any = false;
-    while (!sync_queue.empty() && CountRealPlayers(sync_queue.front().party_members) != 8) {
-        last_persisted_utc_start = sync_queue.front().utc_start;
-        sync_queue.pop_front();
-        skipped_any = true;
-    }
-    if (skipped_any && !settings_folder.empty()) {
-        SaveSettings(settings_folder.c_str()); // persist the advanced watermark now, not on the host's cadence
-    }
-    if (sync_queue.empty()) {
-        return;
-    }
-
-    auto& next = sync_queue.front();
+    // Drain every disqualified entry up front, regardless of queue position, so a stuck head-of-queue
+    // entry (e.g. one that will never find a matching objective) doesn't block entries behind it from
+    // ever being evaluated - the loop only stops at an entry that's either ready to publish or still
+    // within its give-up window. Only full 8-man parties of real players are meaningful for the
+    // leaderboard backend (a solo player filling the other 7 slots with heroes/henchmen still occupies
+    // all 8 slots but isn't a guild run), and a run with no matching GWToolboxdll objective entry can
+    // never be leaderboard-eligible anyway. Both cases mark the entry synced instead of retrying it
+    // forever.
+    bool advanced_watermark = false;
     RemoteObjectiveSet objective_set;
-    const bool have_objective = TryReadMatchingObjectiveEntry(next.utc_start, objective_set);
-    const bool gave_up_waiting = (now - next.first_seen_tick) >= kObjectiveGiveUpTimeoutMs;
-    if (!have_objective) {
-        if (!gave_up_waiting) {
-            return; // wait for GWToolboxdll's own file to catch up; retried next tick
+    bool have_objective = false;
+    while (!sync_queue.empty()) {
+        auto& front = sync_queue.front();
+        if (CountRealPlayers(front.party_members) != 8) {
+            last_persisted_utc_start = front.utc_start;
+            sync_queue.pop_front();
+            advanced_watermark = true;
+            continue;
+        }
+        have_objective = TryReadMatchingObjectiveEntry(front.utc_start, objective_set);
+        if (have_objective) {
+            break; // ready to publish
+        }
+        if ((now - front.first_seen_tick) < kObjectiveGiveUpTimeoutMs) {
+            break; // still within the window; wait for GWToolboxdll's own file to catch up
         }
         // No matching GWToolboxdll objective entry ever showed up - drop this run rather than publish
         // party-only data (no objective timing means it can never be leaderboard-eligible anyway).
         AppendLog(std::format("Dropping run {} (map {}): no matching objective entry after give-up timeout",
-                               next.utc_start, next.map_id));
-        last_persisted_utc_start = next.utc_start;
+                               front.utc_start, front.map_id));
+        last_persisted_utc_start = front.utc_start;
         sync_queue.pop_front();
-        if (!settings_folder.empty()) {
-            SaveSettings(settings_folder.c_str()); // persist the advanced watermark now, not on the host's cadence
-        }
+        advanced_watermark = true;
+    }
+    if (advanced_watermark && !settings_folder.empty()) {
+        SaveSettings(settings_folder.c_str()); // persist the advanced watermark now, not on the host's cadence
+    }
+    if (sync_queue.empty() || !have_objective) {
         return;
     }
+
+    auto& next = sync_queue.front();
 
     // Now that we have the objective data, correct a resign/unknown classification if the run actually
     // finished (e.g. resigning right after killing Dhuum shouldn't read as giving up). Leave "wipe" as

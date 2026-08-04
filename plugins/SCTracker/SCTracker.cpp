@@ -24,6 +24,7 @@
 #include <glaze/glaze.hpp>
 
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <optional>
 #include <sstream>
@@ -130,6 +131,27 @@ namespace {
             return {};
         }
         return docs / computer_name / L"runs";
+    }
+
+    // Own log file, separate from GWToolboxdll's log.txt (which plugins can't write to - it's not part
+    // of the exported surface, and Debug builds hold it open without shared-write access). Lives next to
+    // the runs/ folder rather than in it, since it isn't run data.
+    void AppendLog(const std::string& line)
+    {
+        const auto runs_folder = GetRunsFolder();
+        if (runs_folder.empty()) {
+            return;
+        }
+        std::ofstream out{runs_folder.parent_path() / L"SCTracker.log", std::ios::app};
+        if (!out.is_open()) {
+            return;
+        }
+        const time_t now = time(nullptr);
+        char ts[32] = "";
+        if (const tm* timeinfo = gmtime(&now)) {
+            strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", timeinfo);
+        }
+        out << '[' << ts << "] " << line << '\n';
     }
 
     // Same folder GWToolboxdll's Objective Timer writes ObjectiveTimerRuns_*.json into, so a single
@@ -609,6 +631,13 @@ void SCTracker::ProcessSync()
         }
         else {
             last_publish_attempt_tick = now; // back off before retrying a failed publish
+            std::string body = publish_request->GetContent();
+            if (body.size() > 200) {
+                body.resize(200);
+            }
+            AppendLog(std::format("Publish failed for run {}: status={} http_code={} body={}",
+                                   publishing_utc_start, publish_request->GetStatusStr(),
+                                   publish_request->GetStatusCode(), body));
         }
         publish_request.reset();
     }

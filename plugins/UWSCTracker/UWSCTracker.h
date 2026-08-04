@@ -12,6 +12,7 @@
 #include <deque>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -58,6 +59,7 @@ public:
         bool is_player = false;
         bool is_hero = false;
         bool is_henchman = false;
+        uint32_t deaths = 0; // count of alive->dead transitions seen for this member during the run
     };
 
 private:
@@ -71,6 +73,7 @@ private:
     void OnGameSrvTransfer();
     void OnPartyDefeated();
     void OnWriteToChatLog(const wchar_t* message);
+    void OnUpdateAgentState(uint32_t agent_id, uint32_t state);
     void CaptureParty();
     void WriteLogEntry(uint32_t utc_start, uint32_t map_id, const std::string& character_name,
                         const std::string& end_reason, const std::vector<PartyMember>& members);
@@ -91,6 +94,14 @@ private:
     std::vector<PartyMember> party_members;
     std::vector<std::unique_ptr<PluginUtils::EncString>> party_member_enc_names;
 
+    // Death tracking for the in-progress run: agent_id -> index into party_members, populated as each
+    // member is captured (agent_id is known at that point even before capture fully completes). Not
+    // serialized itself - only the resulting PartyMember::deaths counts are. currently_dead is parallel
+    // to party_members and used purely to detect the alive->dead edge (AgentState can repeat/re-send the
+    // same bit), so a later resurrection doesn't get double-counted and a second death after that does.
+    std::unordered_map<uint32_t, size_t> agent_id_to_party_index;
+    std::vector<bool> party_member_currently_dead;
+
     // Run outcome tracking: reset on every run start (OnInstanceLoadInfo), finalized and logged when the
     // run ends (OnGameSrvTransfer). The actual write is deferred to run-end rather than capture-completion
     // so the log entry can record how the run finished.
@@ -104,6 +115,7 @@ private:
     GW::HookEntry GameSrvTransfer_HookEntry;
     GW::HookEntry PartyDefeated_HookEntry;
     GW::HookEntry WriteToChatLog_HookEntry;
+    GW::HookEntry AgentState_HookEntry;
 
     // --- Backend sync ---
     void ProcessSync();

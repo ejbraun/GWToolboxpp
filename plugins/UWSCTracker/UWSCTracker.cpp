@@ -264,6 +264,11 @@ void UWSCTracker::Initialize(ImGuiContext* ctx, const ImGuiAllocFns allocator_fn
     GW::StoC::RegisterPacketCallback<GW::Packet::StoC::PartyDefeated>(
         &PartyDefeated_HookEntry,
         [this](GW::HookStatus*, GW::Packet::StoC::PartyDefeated*) { OnPartyDefeated(); });
+    GW::StoC::RegisterPacketCallback<GW::Packet::StoC::AgentState>(
+        &AgentState_HookEntry,
+        [this](GW::HookStatus*, const GW::Packet::StoC::AgentState* packet) {
+            OnUpdateAgentState(packet->agent_id, packet->state);
+        });
     GW::UI::RegisterUIMessageCallback(
         &WriteToChatLog_HookEntry, GW::UI::UIMessage::kWriteToChatLog,
         [this](GW::HookStatus*, GW::UI::UIMessage, void* wParam, void*) {
@@ -275,6 +280,7 @@ void UWSCTracker::Initialize(ImGuiContext* ctx, const ImGuiAllocFns allocator_fn
 void UWSCTracker::Terminate()
 {
     GW::UI::RemoveUIMessageCallback(&WriteToChatLog_HookEntry, GW::UI::UIMessage::kWriteToChatLog);
+    GW::StoC::RemoveCallback<GW::Packet::StoC::AgentState>(&AgentState_HookEntry);
     GW::StoC::RemoveCallback<GW::Packet::StoC::PartyDefeated>(&PartyDefeated_HookEntry);
     GW::StoC::RemoveCallback<GW::Packet::StoC::GameSrvTransfer>(&GameSrvTransfer_HookEntry);
     GW::StoC::RemoveCallback<GW::Packet::StoC::InstanceLoadInfo>(&InstanceLoadInfo_HookEntry);
@@ -340,6 +346,29 @@ void UWSCTracker::OnWriteToChatLog(const wchar_t* message)
     }
 }
 
+// GAME_SMSG_AGENT_UPDATE_EFFECTS; state bit 0x0010 is the agent's dead flag. Only counts the
+// alive->dead edge (not every packet while already dead) and re-arms on the dead->alive edge (i.e. a
+// resurrection), so a member who dies twice in the same run is counted twice.
+void UWSCTracker::OnUpdateAgentState(const uint32_t agent_id, const uint32_t state)
+{
+    if (!run_active) {
+        return;
+    }
+    const auto it = agent_id_to_party_index.find(agent_id);
+    if (it == agent_id_to_party_index.end()) {
+        return;
+    }
+    const size_t idx = it->second;
+    const bool now_dead = (state & 0x0010) != 0;
+    if (now_dead == party_member_currently_dead[idx]) {
+        return;
+    }
+    party_member_currently_dead[idx] = now_dead;
+    if (now_dead) {
+        party_members[idx].deaths++;
+    }
+}
+
 void UWSCTracker::OnGameSrvTransfer()
 {
     if (!run_active) {
@@ -398,6 +427,8 @@ void UWSCTracker::CaptureParty()
         }
         party_members.clear();
         party_member_enc_names.clear();
+        agent_id_to_party_index.clear();
+        party_member_currently_dead.clear();
         pending_utc_start = next_utc_start;
         pending_map_id = next_map_id;
         pending_character_name = next_character_name;
@@ -446,6 +477,8 @@ void UWSCTracker::CaptureParty()
             .is_hero = is_hero,
             .is_henchman = is_henchman
         });
+        agent_id_to_party_index[agent_id] = party_members.size() - 1;
+        party_member_currently_dead.push_back(false);
         // NB: Player may have left the game, meaning GW::Agents::GetAgentEncName(agent_id) would fail
         // because the agent is gone. Pass enc_name for real players instead.
         auto enc = std::make_unique<PluginUtils::EncString>();
@@ -662,9 +695,9 @@ void UWSCTracker::SaveSettings(const wchar_t* folder)
 void UWSCTracker::DrawSettings()
 {
     ImGui::TextWrapped(
-        "Writes party composition (players/heroes/henchmen + professions) and how the run ended "
-        "(wipe/resign/completed/unknown) for each explorable-area run to PartyLog_YYYY-MM-DD.json in "
-        "your GWToolbox runs folder, keyed by UTC start time so it can be joined against "
+        "Writes party composition (players/heroes/henchmen + professions + death count) and how the run "
+        "ended (wipe/resign/completed/unknown) for each explorable-area run to PartyLog_YYYY-MM-DD.json "
+        "in your GWToolbox runs folder, keyed by UTC start time so it can be joined against "
         "GWToolboxdll's own ObjectiveTimerRuns_*.json files.");
     if (last_written_utc_start) {
         std::string time_str;

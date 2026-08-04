@@ -5,7 +5,7 @@
 
 #include <GWCA/Utilities/Hook.h>
 
-// unique_ptr<AsyncRestClient> below needs the complete type: ~UWSCTracker() is defaulted inline in
+// unique_ptr<AsyncRestClient> below needs the complete type: ~SCTracker() is defaulted inline in
 // this header, so unique_ptr's deleter is instantiated here too, not just where AsyncRestClient is used.
 #include <RestClient.h>
 
@@ -33,12 +33,12 @@
 //     advances the persisted watermark on confirmed success, so a slow GWToolboxdll write, a network
 //     blip, or the game closing mid-publish just gets retried/caught up on a later sweep instead of
 //     losing data or double-reporting a run.
-class UWSCTracker : public ToolboxPlugin {
+class SCTracker : public ToolboxPlugin {
 public:
-    UWSCTracker() = default;
-    ~UWSCTracker() override = default;
+    SCTracker() = default;
+    ~SCTracker() override = default;
 
-    const char* Name() const override { return "UWSCTracker"; }
+    const char* Name() const override { return "SCTracker"; }
 
     [[nodiscard]] bool HasSettings() const override { return true; }
     void DrawSettings() override;

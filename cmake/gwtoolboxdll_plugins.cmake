@@ -55,8 +55,8 @@ endmacro()
 
 add_tb_plugin(ExamplePlugin)
 
-add_tb_plugin(UWSCTracker)
+add_tb_plugin(SCTracker)
 # Core (PathGetDocumentsPath/PathGetComputerName) so the plugin writes into the same
 # Documents\GWToolboxpp\<computer>\runs folder GWToolboxdll uses, without linking GWToolboxdll internals.
 # RestClient (AsyncRestClient, WinHTTP-backed) for publishing runs to a backend endpoint.
-target_link_libraries(UWSCTracker PRIVATE Core RestClient)
+target_link_libraries(SCTracker PRIVATE Core RestClient)

@@ -1,4 +1,4 @@
-#include "UWSCTracker.h"
+#include "SCTracker.h"
 
 #include <Path.h> // Core: PathGetDocumentsPath / PathGetComputerName
 
@@ -28,7 +28,7 @@
 #include <optional>
 #include <sstream>
 
-// Mirrors the shape written to disk; kept separate from the live UWSCTracker::PartyMember only in
+// Mirrors the shape written to disk; kept separate from the live SCTracker::PartyMember only in
 // name, not in fields. Needs external linkage (i.e. can't live in an anonymous namespace) — glaze's
 // reflection generates a stable name per type and errors (C7631) on internal-linkage types.
 struct LogEntry {
@@ -39,7 +39,7 @@ struct LogEntry {
     // ("wipe" or "resign" or "unknown"); ProcessSync later upgrades "resign"/"unknown" to "completed"
     // once the matched GWToolboxdll objective data confirms the run actually finished.
     std::string end_reason;
-    std::vector<UWSCTracker::PartyMember> party_members;
+    std::vector<SCTracker::PartyMember> party_members;
 };
 
 // Mirrors GWToolboxdll's ObjectiveTimerWindow::Objective::Serialized / ObjectiveSet::Serialized shape
@@ -244,11 +244,11 @@ namespace {
 
 DLLAPI ToolboxPlugin* ToolboxPluginInstance()
 {
-    static UWSCTracker instance;
+    static SCTracker instance;
     return &instance;
 }
 
-void UWSCTracker::Initialize(ImGuiContext* ctx, const ImGuiAllocFns allocator_fns, const HMODULE toolbox_dll)
+void SCTracker::Initialize(ImGuiContext* ctx, const ImGuiAllocFns allocator_fns, const HMODULE toolbox_dll)
 {
     ToolboxPlugin::Initialize(ctx, allocator_fns, toolbox_dll);
     // Positive altitude: triggered after the packet has been processed by the game/GWCA.
@@ -277,7 +277,7 @@ void UWSCTracker::Initialize(ImGuiContext* ctx, const ImGuiAllocFns allocator_fn
         0x8000);
 }
 
-void UWSCTracker::Terminate()
+void SCTracker::Terminate()
 {
     GW::UI::RemoveUIMessageCallback(&WriteToChatLog_HookEntry, GW::UI::UIMessage::kWriteToChatLog);
     GW::StoC::RemoveCallback<GW::Packet::StoC::AgentState>(&AgentState_HookEntry);
@@ -287,7 +287,7 @@ void UWSCTracker::Terminate()
     ToolboxPlugin::Terminate();
 }
 
-void UWSCTracker::OnInstanceLoadInfo(const uint32_t map_id, const bool is_explorable)
+void SCTracker::OnInstanceLoadInfo(const uint32_t map_id, const bool is_explorable)
 {
     if (!is_explorable || !kTrackedMapIds.contains(map_id)) {
         return; // not an area ObjectiveTimerWindow tracks; skip capture entirely for this instance
@@ -313,7 +313,7 @@ void UWSCTracker::OnInstanceLoadInfo(const uint32_t map_id, const bool is_explor
     resigned_login_numbers.clear();
 }
 
-void UWSCTracker::OnPartyDefeated()
+void SCTracker::OnPartyDefeated()
 {
     if (!run_active) {
         return;
@@ -321,7 +321,7 @@ void UWSCTracker::OnPartyDefeated()
     wipe_detected = true;
 }
 
-void UWSCTracker::OnWriteToChatLog(const wchar_t* message)
+void SCTracker::OnWriteToChatLog(const wchar_t* message)
 {
     if (!run_active || !message || wmemcmp(message, kResignedPrefix, 5) != 0) {
         return;
@@ -349,7 +349,7 @@ void UWSCTracker::OnWriteToChatLog(const wchar_t* message)
 // GAME_SMSG_AGENT_UPDATE_EFFECTS; state bit 0x0010 is the agent's dead flag. Only counts the
 // alive->dead edge (not every packet while already dead) and re-arms on the dead->alive edge (i.e. a
 // resurrection), so a member who dies twice in the same run is counted twice.
-void UWSCTracker::OnUpdateAgentState(const uint32_t agent_id, const uint32_t state)
+void SCTracker::OnUpdateAgentState(const uint32_t agent_id, const uint32_t state)
 {
     if (!run_active) {
         return;
@@ -369,7 +369,7 @@ void UWSCTracker::OnUpdateAgentState(const uint32_t agent_id, const uint32_t sta
     }
 }
 
-void UWSCTracker::OnGameSrvTransfer()
+void SCTracker::OnGameSrvTransfer()
 {
     if (!run_active) {
         return;
@@ -409,13 +409,13 @@ void UWSCTracker::OnGameSrvTransfer()
     // cadence like everything else, rather than jumping the queue on the very next tick.
 }
 
-void UWSCTracker::Update(float)
+void SCTracker::Update(float)
 {
     CaptureParty();
     ProcessSync();
 }
 
-void UWSCTracker::CaptureParty()
+void SCTracker::CaptureParty()
 {
     if (restart_requested) {
         // Only safe to tear down the previous run's EncStrings once none are still mid-decode -
@@ -470,7 +470,7 @@ void UWSCTracker::CaptureParty()
                 secondary = static_cast<uint32_t>(living->secondary);
             }
         }
-        party_members.push_back(UWSCTracker::PartyMember{
+        party_members.push_back(SCTracker::PartyMember{
             .primary = primary,
             .secondary = secondary,
             .is_player = is_player,
@@ -507,7 +507,7 @@ void UWSCTracker::CaptureParty()
 // Takes explicit parameters (rather than reading pending_* member state) so ProcessSync can also call
 // this to correct an already-written entry's end_reason once objective data reveals the true outcome
 // (see the completed-run override in ProcessSync), not just OnGameSrvTransfer for the live capture.
-void UWSCTracker::WriteLogEntry(const uint32_t utc_start, const uint32_t map_id, const std::string& character_name,
+void SCTracker::WriteLogEntry(const uint32_t utc_start, const uint32_t map_id, const std::string& character_name,
                                  const std::string& end_reason, const std::vector<PartyMember>& members)
 {
     if (members.empty()) {
@@ -555,7 +555,7 @@ void UWSCTracker::WriteLogEntry(const uint32_t utc_start, const uint32_t map_id,
     }
 }
 
-void UWSCTracker::RefreshSyncQueue()
+void SCTracker::RefreshSyncQueue()
 {
     std::unordered_set<uint32_t> already_queued;
     for (const auto& q : sync_queue) {
@@ -586,7 +586,7 @@ void UWSCTracker::RefreshSyncQueue()
     std::ranges::sort(sync_queue, {}, &SyncQueueEntry::utc_start);
 }
 
-void UWSCTracker::ProcessSync()
+void SCTracker::ProcessSync()
 {
     if (base_url.empty() || machine_key.empty()) {
         return; // publishing not configured; local PartyLog_*.json write is still the durable record
@@ -672,7 +672,7 @@ void UWSCTracker::ProcessSync()
     publish_request->ExecuteAsync();
 }
 
-void UWSCTracker::LoadSettings(const wchar_t* folder)
+void SCTracker::LoadSettings(const wchar_t* folder)
 {
     ToolboxPlugin::LoadSettings(folder);
     settings_folder = folder;
@@ -683,7 +683,7 @@ void UWSCTracker::LoadSettings(const wchar_t* folder)
     PluginUtils::StrCopy(machine_key_buf, machine_key.c_str(), sizeof(machine_key_buf));
 }
 
-void UWSCTracker::SaveSettings(const wchar_t* folder)
+void SCTracker::SaveSettings(const wchar_t* folder)
 {
     settings_folder = folder;
     SaveSetting("base_url", base_url);
@@ -692,7 +692,7 @@ void UWSCTracker::SaveSettings(const wchar_t* folder)
     ToolboxPlugin::SaveSettings(folder);
 }
 
-void UWSCTracker::DrawSettings()
+void SCTracker::DrawSettings()
 {
     ImGui::TextWrapped(
         "Writes party composition (players/heroes/henchmen + professions + death count) and how the run "

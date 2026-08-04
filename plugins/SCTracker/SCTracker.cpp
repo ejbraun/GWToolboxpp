@@ -63,10 +63,12 @@ struct RemoteObjectiveSet {
     std::optional<uint32_t> duration;
 };
 
-// Body for the backend publish request.
+// Body for the backend publish request. objective is always populated by the time this is
+// constructed - ProcessSync drops (rather than publishes) any run that never gets a matching
+// GWToolboxdll objective entry, since party-only data can never be leaderboard-eligible anyway.
 struct PublishPayload {
     LogEntry party;
-    std::optional<RemoteObjectiveSet> objective;
+    RemoteObjectiveSet objective;
 };
 
 namespace {
@@ -256,6 +258,14 @@ namespace {
     bool IsRunCompleted(const RemoteObjectiveSet& objective_set)
     {
         return !objective_set.objectives.empty() && objective_set.objectives.back().status == kObjectiveStatusCompleted;
+    }
+
+    // party_members.size() alone isn't enough to identify a real 8-man guild run - a solo player
+    // filling the other 7 slots with heroes/henchmen also occupies all 8 slots. Count only real
+    // players (is_player == true) instead.
+    uint32_t CountRealPlayers(const std::vector<SCTracker::PartyMember>& members)
+    {
+        return static_cast<uint32_t>(std::ranges::count_if(members, &SCTracker::PartyMember::is_player));
     }
 
     // Encoded prefix for the "<player> has resigned." system chat message. Not human-readable text -
@@ -654,10 +664,12 @@ void SCTracker::ProcessSync()
         return;
     }
 
-    // Only full 8-man parties are meaningful for the leaderboard backend; smaller parties are dropped
-    // from the queue without publishing (marked synced so they don't get retried forever).
+    // Only full 8-man parties of real players are meaningful for the leaderboard backend - a solo
+    // player filling the other 7 slots with heroes/henchmen isn't a guild run, even though it still
+    // occupies all 8 party slots. Smaller/mixed parties are dropped from the queue without
+    // publishing (marked synced so they don't get retried forever).
     bool skipped_any = false;
-    while (!sync_queue.empty() && sync_queue.front().party_members.size() != 8) {
+    while (!sync_queue.empty() && CountRealPlayers(sync_queue.front().party_members) != 8) {
         last_persisted_utc_start = sync_queue.front().utc_start;
         sync_queue.pop_front();
         skipped_any = true;
@@ -673,15 +685,27 @@ void SCTracker::ProcessSync()
     RemoteObjectiveSet objective_set;
     const bool have_objective = TryReadMatchingObjectiveEntry(next.utc_start, objective_set);
     const bool gave_up_waiting = (now - next.first_seen_tick) >= kObjectiveGiveUpTimeoutMs;
-    if (!have_objective && !gave_up_waiting) {
-        return; // wait for GWToolboxdll's own file to catch up; retried next tick
+    if (!have_objective) {
+        if (!gave_up_waiting) {
+            return; // wait for GWToolboxdll's own file to catch up; retried next tick
+        }
+        // No matching GWToolboxdll objective entry ever showed up - drop this run rather than publish
+        // party-only data (no objective timing means it can never be leaderboard-eligible anyway).
+        AppendLog(std::format("Dropping run {} (map {}): no matching objective entry after give-up timeout",
+                               next.utc_start, next.map_id));
+        last_persisted_utc_start = next.utc_start;
+        sync_queue.pop_front();
+        if (!settings_folder.empty()) {
+            SaveSettings(settings_folder.c_str()); // persist the advanced watermark now, not on the host's cadence
+        }
+        return;
     }
 
     // Now that we have the objective data, correct a resign/unknown classification if the run actually
     // finished (e.g. resigning right after killing Dhuum shouldn't read as giving up). Leave "wipe" as
     // reported - a genuine death event stays notable even in the rare case it's right after a kill.
     // Also corrects the local PartyLog_*.json entry, not just the published payload.
-    if (have_objective && next.end_reason != "wipe" && next.end_reason != "completed" && IsRunCompleted(objective_set)) {
+    if (next.end_reason != "wipe" && next.end_reason != "completed" && IsRunCompleted(objective_set)) {
         next.end_reason = "completed";
         WriteLogEntry(next.utc_start, next.map_id, next.character_name, next.end_reason, next.party_members);
     }
@@ -694,10 +718,8 @@ void SCTracker::ProcessSync()
             .end_reason = next.end_reason,
             .party_members = next.party_members,
         },
+        .objective = std::move(objective_set),
     };
-    if (have_objective) {
-        payload.objective = std::move(objective_set);
-    }
 
     std::string url;
     ComposeUrl(url, kBaseUrl, kUploadRunsPath);

@@ -283,7 +283,6 @@ namespace {
         {static_cast<uint32_t>(GW::Constants::SkillID::Finish_Him), {"t1", "Finish Him!"}},
         {static_cast<uint32_t>(GW::Constants::SkillID::Shadow_Walk), {"t1", "Shadow Walk"}},
         {static_cast<uint32_t>(GW::Constants::SkillID::Recall), {"t1", "Recall"}},
-        {static_cast<uint32_t>(GW::Constants::SkillID::Ebon_Escape), {"t1", "Ebon Escape"}},
         {static_cast<uint32_t>(GW::Constants::SkillID::Radiation_Field), {"t2", "Radiation Field"}},
         {static_cast<uint32_t>(GW::Constants::SkillID::Edge_of_Extinction), {"t3", "Edge of Extinction"}},
     };

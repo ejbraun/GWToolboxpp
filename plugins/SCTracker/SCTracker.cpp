@@ -7,6 +7,7 @@
 #include <GWCA/Constants/Skills.h>
 #include <GWCA/Context/CharContext.h>
 #include <GWCA/GameEntities/Agent.h>
+#include <GWCA/GameEntities/Hero.h> // full HeroInfo definition; PartyMgr.h only forward-declares it
 #include <GWCA/GameEntities/Map.h> // full AreaInfo/RegionType definitions; MapMgr.h only forward-declares them
 #include <GWCA/GameEntities/Party.h>
 #include <GWCA/GameEntities/Player.h>
@@ -269,16 +270,22 @@ namespace {
         return static_cast<uint32_t>(std::ranges::count_if(members, &SCTracker::PartyMember::is_player));
     }
 
+    struct RoleSkillInfo {
+        std::string role;
+        std::string skill_name; // English display name - hardcoded rather than decoded from the
+                                 // client's EncString, which would follow the client's language setting.
+    };
+
     // Skill -> role_hint mapping for Ranger/Assassin party members (see OnSkillUsed). Only the
     // profession that would plausibly bring a given skill needs to be listed here; OnSkillUsed
     // already restricts tracking to Ranger/Assassin primaries before consulting this map.
-    const std::unordered_map<uint32_t, std::string> kRoleSkills = {
-        {static_cast<uint32_t>(GW::Constants::SkillID::Finish_Him), "t1"},
-        {static_cast<uint32_t>(GW::Constants::SkillID::Shadow_Walk), "t1"},
-        {static_cast<uint32_t>(GW::Constants::SkillID::Recall), "t1"},
-        {static_cast<uint32_t>(GW::Constants::SkillID::Ebon_Escape), "t1"},
-        {static_cast<uint32_t>(GW::Constants::SkillID::Radiation_Field), "t2"},
-        {static_cast<uint32_t>(GW::Constants::SkillID::Edge_of_Extinction), "t3"},
+    const std::unordered_map<uint32_t, RoleSkillInfo> kRoleSkills = {
+        {static_cast<uint32_t>(GW::Constants::SkillID::Finish_Him), {"t1", "Finish Him!"}},
+        {static_cast<uint32_t>(GW::Constants::SkillID::Shadow_Walk), {"t1", "Shadow Walk"}},
+        {static_cast<uint32_t>(GW::Constants::SkillID::Recall), {"t1", "Recall"}},
+        {static_cast<uint32_t>(GW::Constants::SkillID::Ebon_Escape), {"t1", "Ebon Escape"}},
+        {static_cast<uint32_t>(GW::Constants::SkillID::Radiation_Field), {"t2", "Radiation Field"}},
+        {static_cast<uint32_t>(GW::Constants::SkillID::Edge_of_Extinction), {"t3", "Edge of Extinction"}},
     };
 
     // Encoded prefix for the "<player> has resigned." system chat message. Not human-readable text -
@@ -450,9 +457,9 @@ void SCTracker::OnUpdateAgentState(const uint32_t agent_id, const uint32_t state
     }
 }
 
-// Tags a Ranger/Assassin party member's role_hint the first time they use one of kRoleSkills'
-// mapped skills. Primary profession only (a Ranger/Assassin secondary doesn't count), and
-// first-match-wins - once set, role_hint is never overwritten for the rest of the run.
+// Tags a Ranger/Assassin party member's role_hint/role_skill the first time they use one of
+// kRoleSkills' mapped skills. Primary profession only (a Ranger/Assassin secondary doesn't count),
+// and first-match-wins - once set, neither field is overwritten for the rest of the run.
 void SCTracker::OnSkillUsed(const uint32_t agent_id, const GW::Constants::SkillID skill_id)
 {
     if (!run_active || skill_id == GW::Constants::SkillID::No_Skill) {
@@ -474,7 +481,8 @@ void SCTracker::OnSkillUsed(const uint32_t agent_id, const GW::Constants::SkillI
     if (role_it == kRoleSkills.end()) {
         return;
     }
-    member.role_hint = role_it->second;
+    member.role_hint = role_it->second.role;
+    member.role_skill = role_it->second.skill_name;
 }
 
 void SCTracker::OnGameSrvTransfer()
@@ -567,16 +575,13 @@ void SCTracker::CaptureParty()
         return; // not yet available; retry next tick
     }
 
-    const auto add_member = [&](const uint32_t agent_id, const wchar_t* enc_name,
-                                 const bool is_player, const bool is_hero, const bool is_henchman) {
-        uint32_t primary = 0;
-        uint32_t secondary = 0;
-        if (const GW::Agent* agent = GW::Agents::GetAgentByID(agent_id)) {
-            if (const GW::AgentLiving* living = agent->GetAsAgentLiving()) {
-                primary = static_cast<uint32_t>(living->primary);
-                secondary = static_cast<uint32_t>(living->secondary);
-            }
-        }
+    // primary/secondary come from the party/player/hero roster data, not the agent - the roster is
+    // populated as soon as party membership syncs, whereas another real player's in-world agent can
+    // take a moment longer to spawn/load. Reading it off the agent here raced that load and silently
+    // left late-loading members at primary=secondary=0 (i.e. indistinguishable from Profession::None).
+    const auto add_member = [&](const uint32_t agent_id, const wchar_t* enc_name, const uint32_t primary,
+                                 const uint32_t secondary, const bool is_player, const bool is_hero,
+                                 const bool is_henchman) {
         party_members.push_back(SCTracker::PartyMember{
             .primary = primary,
             .secondary = secondary,
@@ -596,14 +601,22 @@ void SCTracker::CaptureParty()
 
     for (const auto& player : info->players) {
         if (const GW::Player* gwplayer = GW::PlayerMgr::GetPlayerByID(player.login_number)) {
-            add_member(gwplayer->agent_id, gwplayer->name_enc, true, false, false);
+            add_member(gwplayer->agent_id, gwplayer->name_enc, gwplayer->primary, gwplayer->secondary,
+                       true, false, false);
         }
     }
     for (const auto& hero : info->heroes) {
-        add_member(hero.agent_id, nullptr, false, true, false);
+        uint32_t primary = 0;
+        uint32_t secondary = 0;
+        if (const GW::HeroInfo* hero_info = GW::PartyMgr::GetHeroInfo(hero.hero_id)) {
+            primary = static_cast<uint32_t>(hero_info->primary);
+            secondary = static_cast<uint32_t>(hero_info->secondary);
+        }
+        add_member(hero.agent_id, nullptr, primary, secondary, false, true, false);
     }
     for (const auto& hench : info->henchmen) {
-        add_member(hench.agent_id, nullptr, false, false, true);
+        // HenchmanPartyMember exposes only a single profession field - no secondary.
+        add_member(hench.agent_id, nullptr, static_cast<uint32_t>(hench.profession), 0, false, false, true);
     }
 
     if (party_members.empty()) {

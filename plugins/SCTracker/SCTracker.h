@@ -68,6 +68,9 @@ public:
         // Set for Ranger/Assassin members (primary profession only) the first time they use one of
         // kRoleSkills' mapped skills; never overwritten afterward. Absent for everyone else.
         std::optional<std::string> role_hint;
+        // English name of the specific skill that set role_hint (e.g. "Shadow Walk" for "t1").
+        // Always set together with role_hint - absent iff role_hint is absent.
+        std::optional<std::string> role_skill;
     };
 
 private:

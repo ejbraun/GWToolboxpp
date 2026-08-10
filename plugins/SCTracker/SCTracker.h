@@ -85,6 +85,7 @@ private:
     void OnPartyDefeated();
     void OnWriteToChatLog(const wchar_t* message);
     void OnUpdateAgentState(uint32_t agent_id, uint32_t state);
+    void OnAgentUpdateAllegiance(uint32_t agent_id, uint32_t allegiance_bits);
     void OnSkillUsed(uint32_t agent_id, GW::Constants::SkillID skill_id);
     void CaptureParty();
     void WriteLogEntry(uint32_t utc_start, uint32_t map_id, const std::string& character_name,
@@ -120,6 +121,10 @@ private:
     bool run_active = false;
     bool wipe_detected = false;
     std::unordered_set<uint32_t> resigned_login_numbers;
+    // Set once Dhuum's agent spawns hostile (see OnAgentUpdateAllegiance) and left set for the rest
+    // of the run. Deaths after this point are deliberate/expected (e.g. the Dhuum tank) rather than
+    // run-ending mistakes, so OnUpdateAgentState stops incrementing PartyMember::deaths once this is set.
+    bool dhuum_started = false;
 
     uint32_t last_written_utc_start = 0; // for DrawSettings status display only
 
@@ -128,6 +133,7 @@ private:
     GW::HookEntry PartyDefeated_HookEntry;
     GW::HookEntry WriteToChatLog_HookEntry;
     GW::HookEntry AgentState_HookEntry;
+    GW::HookEntry AgentUpdateAllegiance_HookEntry;
     GW::HookEntry GenericValueSelf_HookEntry;
     GW::HookEntry GenericValueTarget_HookEntry;
 

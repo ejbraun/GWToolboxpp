@@ -2,6 +2,7 @@
 
 #include <Path.h> // Core: PathGetDocumentsPath / PathGetComputerName
 
+#include <GWCA/Constants/AgentIDs.h>
 #include <GWCA/Constants/Constants.h>
 #include <GWCA/Constants/Maps.h>
 #include <GWCA/Constants/Skills.h>
@@ -79,6 +80,13 @@ namespace {
     constexpr uint64_t kSyncScanIntervalMs = 5 * 60 * 1000;      // rescan local files for new entries
     constexpr uint64_t kObjectiveGiveUpTimeoutMs = 10 * 60 * 1000; // publish without a matched objective past this
     constexpr uint64_t kRetryBackoffMs = 60 * 1000;               // wait this long before retrying a failed publish
+    constexpr uint32_t kDeathTrackingGraceSec = 60; // ignore deaths in the first minute of the instance
+
+    // Marks Dhuum's agent turning hostile (GAME_SMSG_AGENT_UPDATE_ALLEGIANCE). Same signal
+    // ObjectiveTimerWindow::AddUWObjectiveSet() uses to start its "Dhuum" objective
+    // (GWToolboxdll/Windows/ObjectiveTimerWindow.cpp) - mirrored here rather than read from that
+    // module, since plugins can't include GWToolboxdll's internal headers.
+    constexpr uint32_t kDhuumHostileAllegianceBits = 0x6D6F6E31;
 
     // The exact set of GW::Constants::MapID values ObjectiveTimerWindow::AddObjectiveSet()'s switch
     // statement matches (GWToolboxdll/Windows/ObjectiveTimerWindow.cpp) - i.e. every area it will
@@ -321,6 +329,11 @@ void SCTracker::Initialize(ImGuiContext* ctx, const ImGuiAllocFns allocator_fns,
         [this](GW::HookStatus*, const GW::Packet::StoC::AgentState* packet) {
             OnUpdateAgentState(packet->agent_id, packet->state);
         });
+    GW::StoC::RegisterPacketCallback<GW::Packet::StoC::AgentUpdateAllegiance>(
+        &AgentUpdateAllegiance_HookEntry,
+        [this](GW::HookStatus*, const GW::Packet::StoC::AgentUpdateAllegiance* packet) {
+            OnAgentUpdateAllegiance(packet->agent_id, packet->allegiance_bits);
+        });
     // Skill used on self / no target.
     GW::StoC::RegisterPacketCallback<GW::Packet::StoC::GenericValue>(
         &GenericValueSelf_HookEntry,
@@ -367,6 +380,7 @@ void SCTracker::Terminate()
     GW::UI::RemoveUIMessageCallback(&WriteToChatLog_HookEntry, GW::UI::UIMessage::kWriteToChatLog);
     GW::StoC::RemoveCallback<GW::Packet::StoC::GenericValueTarget>(&GenericValueTarget_HookEntry);
     GW::StoC::RemoveCallback<GW::Packet::StoC::GenericValue>(&GenericValueSelf_HookEntry);
+    GW::StoC::RemoveCallback<GW::Packet::StoC::AgentUpdateAllegiance>(&AgentUpdateAllegiance_HookEntry);
     GW::StoC::RemoveCallback<GW::Packet::StoC::AgentState>(&AgentState_HookEntry);
     GW::StoC::RemoveCallback<GW::Packet::StoC::PartyDefeated>(&PartyDefeated_HookEntry);
     GW::StoC::RemoveCallback<GW::Packet::StoC::GameSrvTransfer>(&GameSrvTransfer_HookEntry);
@@ -398,6 +412,7 @@ void SCTracker::OnInstanceLoadInfo(const uint32_t map_id, const bool is_explorab
     run_active = true;
     wipe_detected = false;
     resigned_login_numbers.clear();
+    dhuum_started = false;
 }
 
 void SCTracker::OnPartyDefeated()
@@ -435,10 +450,17 @@ void SCTracker::OnWriteToChatLog(const wchar_t* message)
 
 // GAME_SMSG_AGENT_UPDATE_EFFECTS; state bit 0x0010 is the agent's dead flag. Only counts the
 // alive->dead edge (not every packet while already dead) and re-arms on the dead->alive edge (i.e. a
-// resurrection), so a member who dies twice in the same run is counted twice.
+// resurrection), so a member who dies twice in the same run is counted twice. Deaths in the first
+// minute of the instance (loading in, initial positioning, an early accidental pull) aren't counted -
+// party_member_currently_dead is deliberately left unsynced during that window, same as dhuum_started:
+// the first real edge evaluated after the grace period compares against whatever it defaulted to,
+// which self-corrects rather than needing to be back-filled.
 void SCTracker::OnUpdateAgentState(const uint32_t agent_id, const uint32_t state)
 {
-    if (!run_active) {
+    if (!run_active || dhuum_started) {
+        return;
+    }
+    if (static_cast<uint32_t>(time(nullptr)) - pending_utc_start < kDeathTrackingGraceSec) {
         return;
     }
     const auto it = agent_id_to_party_index.find(agent_id);
@@ -453,6 +475,22 @@ void SCTracker::OnUpdateAgentState(const uint32_t agent_id, const uint32_t state
     party_member_currently_dead[idx] = now_dead;
     if (now_dead) {
         party_members[idx].deaths++;
+    }
+}
+
+// Fires on Dhuum's agent turning hostile (living->player_number doubles as the model id for NPC
+// agents - see AgentIDs.h's ModelID namespace comment). Latches dhuum_started for the rest of the
+// run; OnUpdateAgentState stops counting deaths once it's set, since deaths during/after the Dhuum
+// fight (e.g. the tank) are expected, not run-ending mistakes.
+void SCTracker::OnAgentUpdateAllegiance(const uint32_t agent_id, const uint32_t allegiance_bits)
+{
+    if (!run_active || dhuum_started || allegiance_bits != kDhuumHostileAllegianceBits) {
+        return;
+    }
+    const GW::Agent* agent = GW::Agents::GetAgentByID(agent_id);
+    const GW::AgentLiving* living = agent ? agent->GetAsAgentLiving() : nullptr;
+    if (living && living->player_number == static_cast<uint32_t>(GW::Constants::ModelID::UW::Dhuum)) {
+        dhuum_started = true;
     }
 }
 

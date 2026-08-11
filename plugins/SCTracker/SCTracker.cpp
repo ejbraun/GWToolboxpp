@@ -344,14 +344,16 @@ void SCTracker::Initialize(ImGuiContext* ctx, const ImGuiAllocFns allocator_fns,
                 case GW::Packet::StoC::GenericValueID::skill_finished:
                 case GW::Packet::StoC::GenericValueID::attack_skill_activated:
                 case GW::Packet::StoC::GenericValueID::attack_skill_finished:
-                    OnSkillUsed(packet->agent_id, static_cast<GW::Constants::SkillID>(packet->value));
+                    OnSkillUsed(packet->agent_id, static_cast<GW::Constants::SkillID>(packet->value), packet->value_id);
                     break;
                 default:
                     break;
             }
         });
-    // Skill used on a target (caster is the actual user; agent_id/target field naming is reversed
-    // for this packet - see GenericValueTarget's field comments).
+    // Skill used on a target. Field names are misleading for these event ids: per GenericValueID's
+    // own comments in StoC.h ("caster_id is victim and target_id is caster"), and confirmed by
+    // PartyStatisticsWindow's SkillCallback (GWToolboxdll/Windows/PartyStatisticsWindow.cpp), the
+    // actual caster is packet->target, not packet->caster.
     GW::StoC::RegisterPacketCallback<GW::Packet::StoC::GenericValueTarget>(
         &GenericValueTarget_HookEntry,
         [this](GW::HookStatus*, const GW::Packet::StoC::GenericValueTarget* packet) {
@@ -361,7 +363,7 @@ void SCTracker::Initialize(ImGuiContext* ctx, const ImGuiAllocFns allocator_fns,
                 case GW::Packet::StoC::GenericValueID::skill_finished:
                 case GW::Packet::StoC::GenericValueID::attack_skill_activated:
                 case GW::Packet::StoC::GenericValueID::attack_skill_finished:
-                    OnSkillUsed(packet->caster, static_cast<GW::Constants::SkillID>(packet->value));
+                    OnSkillUsed(packet->target, static_cast<GW::Constants::SkillID>(packet->value), packet->Value_id);
                     break;
                 default:
                     break;
@@ -494,10 +496,15 @@ void SCTracker::OnAgentUpdateAllegiance(const uint32_t agent_id, const uint32_t 
     }
 }
 
+// Also counts GW::Constants::SkillID::Resurrect uses (resurrection scroll - it casts like a spell,
+// with the same activated/finished packets a real skill would send) into
+// PartyMember::rez_scroll_uses, gated to value_id == skill_finished so a single use is counted once
+// (skill_activated/skill_finished both fire per cast; finished is the one that means it completed).
+//
 // Tags a Ranger/Assassin party member's role_hint/role_skill the first time they use one of
 // kRoleSkills' mapped skills. Primary profession only (a Ranger/Assassin secondary doesn't count),
 // and first-match-wins - once set, neither field is overwritten for the rest of the run.
-void SCTracker::OnSkillUsed(const uint32_t agent_id, const GW::Constants::SkillID skill_id)
+void SCTracker::OnSkillUsed(const uint32_t agent_id, const GW::Constants::SkillID skill_id, const uint32_t value_id)
 {
     if (!run_active || skill_id == GW::Constants::SkillID::No_Skill) {
         return;
@@ -507,6 +514,11 @@ void SCTracker::OnSkillUsed(const uint32_t agent_id, const GW::Constants::SkillI
         return;
     }
     PartyMember& member = party_members[member_it->second];
+
+    if (skill_id == GW::Constants::SkillID::Resurrect && value_id == GW::Packet::StoC::GenericValueID::skill_finished) {
+        member.rez_scroll_uses++;
+    }
+
     if (member.role_hint.has_value()) {
         return;
     }

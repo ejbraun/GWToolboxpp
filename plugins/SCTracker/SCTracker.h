@@ -71,6 +71,9 @@ public:
         // English name of the specific skill that set role_hint (e.g. "Shadow Walk" for "t1").
         // Always set together with role_hint - absent iff role_hint is absent.
         std::optional<std::string> role_skill;
+        // Count of completed GW::Constants::SkillID::Resurrect casts (resurrection scroll) by this
+        // member during the run.
+        uint32_t rez_scroll_uses = 0;
     };
 
 private:
@@ -86,7 +89,7 @@ private:
     void OnWriteToChatLog(const wchar_t* message);
     void OnUpdateAgentState(uint32_t agent_id, uint32_t state);
     void OnAgentUpdateAllegiance(uint32_t agent_id, uint32_t allegiance_bits);
-    void OnSkillUsed(uint32_t agent_id, GW::Constants::SkillID skill_id);
+    void OnSkillUsed(uint32_t agent_id, GW::Constants::SkillID skill_id, uint32_t value_id);
     void CaptureParty();
     void WriteLogEntry(uint32_t utc_start, uint32_t map_id, const std::string& character_name,
                         const std::string& end_reason, const std::vector<PartyMember>& members);

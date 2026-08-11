@@ -11,7 +11,6 @@
 
 #include <deque>
 #include <memory>
-#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -65,12 +64,12 @@ public:
         bool is_hero = false;
         bool is_henchman = false;
         uint32_t deaths = 0; // count of alive->dead transitions seen for this member during the run
-        // Set for Ranger/Assassin members (primary profession only) the first time they use one of
-        // kRoleSkills' mapped skills; never overwritten afterward. Absent for everyone else.
-        std::optional<std::string> role_hint;
-        // English name of the specific skill that set role_hint (e.g. "Shadow Walk" for "t1").
-        // Always set together with role_hint - absent iff role_hint is absent.
-        std::optional<std::string> role_skill;
+        // English names of every kTrackedSkillNames skill this member (if a Ranger/Assassin primary)
+        // has used at least once during the run, deduped. Empty for everyone else, or if none used.
+        std::vector<std::string> role_skills;
+        // "t1"/"t2"/"t3" once role_skills satisfies one of kRoleCombos, else "unknown". Set once and
+        // never overwritten afterward.
+        std::string role_hint = "unknown";
         // Count of completed GW::Constants::SkillID::Resurrect casts (resurrection scroll) by this
         // member during the run.
         uint32_t rez_scroll_uses = 0;

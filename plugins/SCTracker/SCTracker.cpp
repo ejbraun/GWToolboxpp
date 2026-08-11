@@ -278,21 +278,40 @@ namespace {
         return static_cast<uint32_t>(std::ranges::count_if(members, &SCTracker::PartyMember::is_player));
     }
 
-    struct RoleSkillInfo {
-        std::string role;
-        std::string skill_name; // English display name - hardcoded rather than decoded from the
-                                 // client's EncString, which would follow the client's language setting.
+    constexpr const char* kUnknownRole = "unknown";
+
+    // Every skill relevant to t1/t2/t3 for Ranger/Assassin party members (see OnSkillUsed) -> English
+    // display name, hardcoded rather than decoded from the client's EncString, which would follow the
+    // client's language setting. Populates PartyMember::role_skills whenever any of these is used,
+    // independent of whether a role can actually be determined from it (see kRoleCombos).
+    const std::unordered_map<uint32_t, std::string> kTrackedSkillNames = {
+        {static_cast<uint32_t>(GW::Constants::SkillID::Shadow_of_Haste), "Shadow of Haste"},
+        {static_cast<uint32_t>(GW::Constants::SkillID::Shadow_Walk), "Shadow Walk"},
+        {static_cast<uint32_t>(GW::Constants::SkillID::Winnowing), "Winnowing"},
+        {static_cast<uint32_t>(GW::Constants::SkillID::Finish_Him), "Finish Him!"},
+        {static_cast<uint32_t>(GW::Constants::SkillID::Recall), "Recall"},
+        {static_cast<uint32_t>(GW::Constants::SkillID::Radiation_Field), "Radiation Field"},
+        {static_cast<uint32_t>(GW::Constants::SkillID::Vipers_Defense), "Viper's Defense"},
+        {static_cast<uint32_t>(GW::Constants::SkillID::Edge_of_Extinction), "Edge of Extinction"},
+        {static_cast<uint32_t>(GW::Constants::SkillID::Quickening_Zephyr), "Quickening Zephyr"},
     };
 
-    // Skill -> role_hint mapping for Ranger/Assassin party members (see OnSkillUsed). Only the
-    // profession that would plausibly bring a given skill needs to be listed here; OnSkillUsed
-    // already restricts tracking to Ranger/Assassin primaries before consulting this map.
-    const std::unordered_map<uint32_t, RoleSkillInfo> kRoleSkills = {
-        {static_cast<uint32_t>(GW::Constants::SkillID::Finish_Him), {"t1", "Finish Him!"}},
-        {static_cast<uint32_t>(GW::Constants::SkillID::Shadow_Walk), {"t1", "Shadow Walk"}},
-        {static_cast<uint32_t>(GW::Constants::SkillID::Recall), {"t1", "Recall"}},
-        {static_cast<uint32_t>(GW::Constants::SkillID::Radiation_Field), {"t2", "Radiation Field"}},
-        {static_cast<uint32_t>(GW::Constants::SkillID::Edge_of_Extinction), {"t3", "Edge of Extinction"}},
+    struct RoleCombo {
+        const char* role;
+        std::vector<std::string> required_skills; // ALL must appear in role_skills to satisfy this combo
+    };
+
+    // role_hint is set to the role of the first of these combos whose required_skills are all present
+    // in a member's role_skills (checked in this order, so t1 combos are preferred over t3 combos if
+    // both could apply at once - see OnSkillUsed). Radiation Field alone is sufficient for t2; Viper's
+    // Defense is tracked (kTrackedSkillNames) but doesn't itself factor into any combo below.
+    const std::vector<RoleCombo> kRoleCombos = {
+        {"t1", {"Shadow of Haste", "Shadow Walk"}},
+        {"t1", {"Winnowing", "Finish Him!"}},
+        {"t1", {"Shadow of Haste", "Recall"}},
+        {"t2", {"Radiation Field"}},
+        {"t3", {"Shadow of Haste", "Edge of Extinction"}},
+        {"t3", {"Shadow of Haste", "Quickening Zephyr"}},
     };
 
     // Encoded prefix for the "<player> has resigned." system chat message. Not human-readable text -
@@ -501,9 +520,10 @@ void SCTracker::OnAgentUpdateAllegiance(const uint32_t agent_id, const uint32_t 
 // PartyMember::rez_scroll_uses, gated to value_id == skill_finished so a single use is counted once
 // (skill_activated/skill_finished both fire per cast; finished is the one that means it completed).
 //
-// Tags a Ranger/Assassin party member's role_hint/role_skill the first time they use one of
-// kRoleSkills' mapped skills. Primary profession only (a Ranger/Assassin secondary doesn't count),
-// and first-match-wins - once set, neither field is overwritten for the rest of the run.
+// For Ranger/Assassin party members (primary profession only), records every kTrackedSkillNames hit
+// into role_skills (deduped), then - only while role_hint is still "unknown" - checks kRoleCombos in
+// order and locks in the role of the first fully-satisfied combo. Once role_hint is set it's never
+// changed again for the rest of the run.
 void SCTracker::OnSkillUsed(const uint32_t agent_id, const GW::Constants::SkillID skill_id, const uint32_t value_id)
 {
     if (!run_active || skill_id == GW::Constants::SkillID::No_Skill) {
@@ -519,19 +539,28 @@ void SCTracker::OnSkillUsed(const uint32_t agent_id, const GW::Constants::SkillI
         member.rez_scroll_uses++;
     }
 
-    if (member.role_hint.has_value()) {
-        return;
-    }
     const auto primary = static_cast<GW::Constants::Profession>(member.primary);
     if (primary != GW::Constants::Profession::Ranger && primary != GW::Constants::Profession::Assassin) {
         return;
     }
-    const auto role_it = kRoleSkills.find(static_cast<uint32_t>(skill_id));
-    if (role_it == kRoleSkills.end()) {
-        return;
+    const auto name_it = kTrackedSkillNames.find(static_cast<uint32_t>(skill_id));
+    if (name_it == kTrackedSkillNames.end() || std::ranges::contains(member.role_skills, name_it->second)) {
+        return; // not a tracked skill, or already recorded - nothing new to (re-)evaluate
     }
-    member.role_hint = role_it->second.role;
-    member.role_skill = role_it->second.skill_name;
+    member.role_skills.push_back(name_it->second);
+
+    if (member.role_hint != kUnknownRole) {
+        return; // already locked in
+    }
+    for (const auto& combo : kRoleCombos) {
+        const bool satisfied = std::ranges::all_of(combo.required_skills, [&](const std::string& s) {
+            return std::ranges::contains(member.role_skills, s);
+        });
+        if (satisfied) {
+            member.role_hint = combo.role;
+            break;
+        }
+    }
 }
 
 void SCTracker::OnGameSrvTransfer()

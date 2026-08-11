@@ -4,6 +4,7 @@
 
 #include <GWCA/Constants/AgentIDs.h>
 #include <GWCA/Constants/Constants.h>
+#include <GWCA/Constants/ItemIDs.h>
 #include <GWCA/Constants/Maps.h>
 #include <GWCA/Constants/Skills.h>
 #include <GWCA/Context/CharContext.h>
@@ -314,6 +315,19 @@ namespace {
         {"t3", {"Shadow of Haste", "Quickening Zephyr"}},
     };
 
+    // model_ids counted into PartyMember::item_drops (see OnItemGeneral/OnItemUpdateOwner). model_id,
+    // not item_id, identifies an item type: item_id is per-drop-instance and gets recycled
+    // (GAME_SMSG_ITEM_REUSE_ID) - model_id is what GWCA's own item APIs (GetItemByModelId etc.,
+    // ItemMgr.h) key on instead, and what's sent to the backend (PartyMember::ItemDropCount::id) - the
+    // backend is expected to already have its own id -> display name mapping.
+    const std::unordered_set<uint32_t> kTrackedItems = {
+        GW::Constants::ItemID::GlobofEctoplasm, // Glob of Ectoplasm
+        GW::Constants::ItemID::VoltaicSpear,    // Voltaic Spear
+        GW::Constants::ItemID::DSR,             // DSR
+        GW::Constants::ItemID::EternalBlade,    // Eternal Blade
+        GW::Constants::ItemID::MiniDhuum,       // Mini Dhuum
+    };
+
     // Encoded prefix for the "<player> has resigned." system chat message. Not human-readable text -
     // it's GW's fixed per-template control-code sequence, so it matches regardless of the client's
     // display language (only the decoded text varies by language, not the encoded template id). Same
@@ -388,6 +402,14 @@ void SCTracker::Initialize(ImGuiContext* ctx, const ImGuiAllocFns allocator_fns,
                     break;
             }
         });
+    GW::StoC::RegisterPacketCallback<GW::Packet::StoC::ItemGeneral>(
+        &ItemGeneral_HookEntry, [this](GW::HookStatus*, const GW::Packet::StoC::ItemGeneral* packet) {
+            OnItemGeneral(packet->item_id, packet->model_id);
+        });
+    GW::StoC::RegisterPacketCallback<GW::Packet::StoC::ItemUpdateOwner>(
+        &ItemUpdateOwner_HookEntry, [this](GW::HookStatus*, const GW::Packet::StoC::ItemUpdateOwner* packet) {
+            OnItemUpdateOwner(packet->item_id, packet->owner_agent_id);
+        });
     GW::UI::RegisterUIMessageCallback(
         &WriteToChatLog_HookEntry, GW::UI::UIMessage::kWriteToChatLog,
         [this](GW::HookStatus*, GW::UI::UIMessage, void* wParam, void*) {
@@ -399,6 +421,8 @@ void SCTracker::Initialize(ImGuiContext* ctx, const ImGuiAllocFns allocator_fns,
 void SCTracker::Terminate()
 {
     GW::UI::RemoveUIMessageCallback(&WriteToChatLog_HookEntry, GW::UI::UIMessage::kWriteToChatLog);
+    GW::StoC::RemoveCallback<GW::Packet::StoC::ItemUpdateOwner>(&ItemUpdateOwner_HookEntry);
+    GW::StoC::RemoveCallback<GW::Packet::StoC::ItemGeneral>(&ItemGeneral_HookEntry);
     GW::StoC::RemoveCallback<GW::Packet::StoC::GenericValueTarget>(&GenericValueTarget_HookEntry);
     GW::StoC::RemoveCallback<GW::Packet::StoC::GenericValue>(&GenericValueSelf_HookEntry);
     GW::StoC::RemoveCallback<GW::Packet::StoC::AgentUpdateAllegiance>(&AgentUpdateAllegiance_HookEntry);
@@ -434,6 +458,7 @@ void SCTracker::OnInstanceLoadInfo(const uint32_t map_id, const bool is_explorab
     wipe_detected = false;
     resigned_login_numbers.clear();
     dhuum_started = false;
+    tracked_item_id_to_model_id.clear();
 }
 
 void SCTracker::OnPartyDefeated()
@@ -560,6 +585,50 @@ void SCTracker::OnSkillUsed(const uint32_t agent_id, const GW::Constants::SkillI
             member.role_hint = combo.role;
             break;
         }
+    }
+}
+
+// GAME_SMSG_ITEM_GENERAL_INFO - fires for items as they're identified client-side (e.g. a drop
+// landing). Caches item_id -> model_id only for kTrackedItems hits, so OnItemUpdateOwner has
+// something to resolve the item_id it gets to. Untracked items are never cached, keeping this bounded
+// to however many tracked-item drops are in flight at once.
+void SCTracker::OnItemGeneral(const uint32_t item_id, const uint32_t model_id)
+{
+    if (!run_active || !kTrackedItems.contains(model_id)) {
+        return;
+    }
+    tracked_item_id_to_model_id[item_id] = model_id;
+}
+
+// GAME_SMSG_ITEM_UPDATE_OWNER - loot reservation, broadcast to the whole party (not just the
+// recipient). Can re-fire for the same item_id if the reservation is reassigned (GWToolboxdll's
+// ItemDrops module tracks this by updating an owner map in place, not counting) - only the first
+// firing for a given tracked item_id is counted here, then the cache entry is erased so a later
+// reassignment isn't double-counted. Reflects who it was reserved for, not confirmed pickup - another
+// player's inventory contents beyond a reservation broadcast aren't visible to this client at all.
+void SCTracker::OnItemUpdateOwner(const uint32_t item_id, const uint32_t owner_agent_id)
+{
+    if (!run_active) {
+        return;
+    }
+    const auto model_it = tracked_item_id_to_model_id.find(item_id);
+    if (model_it == tracked_item_id_to_model_id.end()) {
+        return;
+    }
+    const uint32_t model_id = model_it->second;
+    tracked_item_id_to_model_id.erase(model_it);
+
+    const auto member_it = agent_id_to_party_index.find(owner_agent_id);
+    if (member_it == agent_id_to_party_index.end()) {
+        return;
+    }
+    auto& drops = party_members[member_it->second].item_drops;
+    const auto drop_it = std::ranges::find(drops, model_id, &PartyMember::ItemDropCount::id);
+    if (drop_it != drops.end()) {
+        drop_it->count++;
+    }
+    else {
+        drops.push_back({.id = model_id, .count = 1});
     }
 }
 

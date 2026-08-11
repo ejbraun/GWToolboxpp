@@ -73,6 +73,14 @@ public:
         // Count of completed GW::Constants::SkillID::Resurrect casts (resurrection scroll) by this
         // member during the run.
         uint32_t rez_scroll_uses = 0;
+        struct ItemDropCount {
+            uint32_t id = 0; // model_id (GW::Constants::ItemID) of a kTrackedItems entry
+            uint32_t count = 0;
+        };
+        // One entry per kTrackedItems model_id reserved for this member at least once during the run.
+        // Reflects initial loot reservation (GAME_SMSG_ITEM_UPDATE_OWNER), not confirmed pickup - see
+        // OnItemUpdateOwner.
+        std::vector<ItemDropCount> item_drops;
     };
 
 private:
@@ -89,6 +97,8 @@ private:
     void OnUpdateAgentState(uint32_t agent_id, uint32_t state);
     void OnAgentUpdateAllegiance(uint32_t agent_id, uint32_t allegiance_bits);
     void OnSkillUsed(uint32_t agent_id, GW::Constants::SkillID skill_id, uint32_t value_id);
+    void OnItemGeneral(uint32_t item_id, uint32_t model_id);
+    void OnItemUpdateOwner(uint32_t item_id, uint32_t owner_agent_id);
     void CaptureParty();
     void WriteLogEntry(uint32_t utc_start, uint32_t map_id, const std::string& character_name,
                         const std::string& end_reason, const std::vector<PartyMember>& members);
@@ -117,6 +127,11 @@ private:
     std::unordered_map<uint32_t, size_t> agent_id_to_party_index;
     std::vector<bool> party_member_currently_dead;
 
+    // item_id -> model_id for tracked-item drops seen via ItemGeneral but not yet resolved to an
+    // owner. Erased once OnItemUpdateOwner counts it (or the owner isn't a tracked party member), so a
+    // later reservation reassignment for the same item_id isn't double-counted. Reset every run.
+    std::unordered_map<uint32_t, uint32_t> tracked_item_id_to_model_id;
+
     // Run outcome tracking: reset on every run start (OnInstanceLoadInfo), finalized and logged when the
     // run ends (OnGameSrvTransfer). The actual write is deferred to run-end rather than capture-completion
     // so the log entry can record how the run finished.
@@ -138,6 +153,8 @@ private:
     GW::HookEntry AgentUpdateAllegiance_HookEntry;
     GW::HookEntry GenericValueSelf_HookEntry;
     GW::HookEntry GenericValueTarget_HookEntry;
+    GW::HookEntry ItemGeneral_HookEntry;
+    GW::HookEntry ItemUpdateOwner_HookEntry;
 
     // --- Backend sync ---
     void ProcessSync();

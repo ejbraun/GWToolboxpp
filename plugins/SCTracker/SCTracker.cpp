@@ -89,6 +89,12 @@ namespace {
     // module, since plugins can't include GWToolboxdll's internal headers.
     constexpr uint32_t kDhuumHostileAllegianceBits = 0x6D6F6E31;
 
+    // Native mission-objective id for UW's "Dhuum" objective (GAME_SMSG_MISSION_OBJECTIVE_COMPLETE).
+    // Same id ObjectiveTimerWindow::AddUWObjectiveSet() uses to end its own "Dhuum" objective
+    // (GWToolboxdll/Windows/ObjectiveTimerWindow.cpp) - mirrored here for the same reason as
+    // kDhuumHostileAllegianceBits above.
+    constexpr uint32_t kDhuumObjectiveId = 157;
+
     // The exact set of GW::Constants::MapID values ObjectiveTimerWindow::AddObjectiveSet()'s switch
     // statement matches (GWToolboxdll/Windows/ObjectiveTimerWindow.cpp) - i.e. every area it will
     // actually create an ObjectiveSet for. Everything else (random missions, vanquishes, etc.) is
@@ -366,6 +372,10 @@ void SCTracker::Initialize(ImGuiContext* ctx, const ImGuiAllocFns allocator_fns,
         [this](GW::HookStatus*, const GW::Packet::StoC::AgentUpdateAllegiance* packet) {
             OnAgentUpdateAllegiance(packet->agent_id, packet->allegiance_bits);
         });
+    GW::StoC::RegisterPacketCallback<GW::Packet::StoC::ObjectiveDone>(
+        &ObjectiveDone_HookEntry, [this](GW::HookStatus*, const GW::Packet::StoC::ObjectiveDone* packet) {
+            OnObjectiveDone(packet->objective_id);
+        });
     // Skill used on self / no target.
     GW::StoC::RegisterPacketCallback<GW::Packet::StoC::GenericValue>(
         &GenericValueSelf_HookEntry,
@@ -424,6 +434,7 @@ void SCTracker::Terminate()
     GW::StoC::RemoveCallback<GW::Packet::StoC::ItemGeneral>(&ItemGeneral_HookEntry);
     GW::StoC::RemoveCallback<GW::Packet::StoC::GenericValueTarget>(&GenericValueTarget_HookEntry);
     GW::StoC::RemoveCallback<GW::Packet::StoC::GenericValue>(&GenericValueSelf_HookEntry);
+    GW::StoC::RemoveCallback<GW::Packet::StoC::ObjectiveDone>(&ObjectiveDone_HookEntry);
     GW::StoC::RemoveCallback<GW::Packet::StoC::AgentUpdateAllegiance>(&AgentUpdateAllegiance_HookEntry);
     GW::StoC::RemoveCallback<GW::Packet::StoC::AgentState>(&AgentState_HookEntry);
     GW::StoC::RemoveCallback<GW::Packet::StoC::PartyDefeated>(&PartyDefeated_HookEntry);
@@ -457,6 +468,7 @@ void SCTracker::OnInstanceLoadInfo(const uint32_t map_id, const bool is_explorab
     wipe_detected = false;
     resigned_login_numbers.clear();
     dhuum_started = false;
+    dhuum_completed = false;
     tracked_item_id_to_model_id.clear();
 }
 
@@ -539,6 +551,17 @@ void SCTracker::OnAgentUpdateAllegiance(const uint32_t agent_id, const uint32_t 
     }
 }
 
+// GAME_SMSG_MISSION_OBJECTIVE_COMPLETE - fires for any completed native mission objective, not just
+// Dhuum's; only kDhuumObjectiveId is relevant here. Latches dhuum_completed for the rest of the run;
+// OnItemGeneral stops counting Glob of Ectoplasm drops once it's set.
+void SCTracker::OnObjectiveDone(const uint32_t objective_id)
+{
+    if (!run_active || objective_id != kDhuumObjectiveId) {
+        return;
+    }
+    dhuum_completed = true;
+}
+
 // For Ranger/Assassin party members (primary profession only), records every kTrackedSkillNames hit
 // into role_skills (deduped), then - only while role_hint is still "unknown" - checks kRoleCombos in
 // order and locks in the role of the first fully-satisfied combo. Once role_hint is set it's never
@@ -612,10 +635,14 @@ void SCTracker::MaybeAssignT1ByElimination()
 // GAME_SMSG_ITEM_GENERAL_INFO - fires for items as they're identified client-side (e.g. a drop
 // landing). Caches item_id -> model_id only for kTrackedItems hits, so OnItemUpdateOwner has
 // something to resolve the item_id it gets to. Untracked items are never cached, keeping this bounded
-// to however many tracked-item drops are in flight at once.
+// to however many tracked-item drops are in flight at once. Glob of Ectoplasm specifically stops being
+// cached (and therefore counted) once dhuum_completed is set - other tracked items are unaffected.
 void SCTracker::OnItemGeneral(const uint32_t item_id, const uint32_t model_id)
 {
     if (!run_active || !kTrackedItems.contains(model_id)) {
+        return;
+    }
+    if (dhuum_completed && model_id == static_cast<uint32_t>(GW::Constants::ItemID::GlobofEctoplasm)) {
         return;
     }
     tracked_item_id_to_model_id[item_id] = model_id;

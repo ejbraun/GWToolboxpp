@@ -93,6 +93,7 @@ private:
     void OnWriteToChatLog(const wchar_t* message);
     void OnUpdateAgentState(uint32_t agent_id, uint32_t state);
     void OnAgentUpdateAllegiance(uint32_t agent_id, uint32_t allegiance_bits);
+    void OnObjectiveDone(uint32_t objective_id);
     void OnSkillUsed(uint32_t agent_id, GW::Constants::SkillID skill_id);
     void MaybeAssignT1ByElimination();
     void OnItemGeneral(uint32_t item_id, uint32_t model_id);
@@ -140,6 +141,10 @@ private:
     // of the run. Deaths after this point are deliberate/expected (e.g. the Dhuum tank) rather than
     // run-ending mistakes, so OnUpdateAgentState stops incrementing PartyMember::deaths once this is set.
     bool dhuum_started = false;
+    // Set once the native Dhuum mission-objective completes (see OnObjectiveDone) and left set for the
+    // rest of the run. OnItemGeneral stops counting Glob of Ectoplasm drops into item_drops once this
+    // is set - other tracked items are unaffected.
+    bool dhuum_completed = false;
 
     uint32_t last_written_utc_start = 0; // for DrawSettings status display only
 
@@ -153,6 +158,7 @@ private:
     GW::HookEntry GenericValueTarget_HookEntry;
     GW::HookEntry ItemGeneral_HookEntry;
     GW::HookEntry ItemUpdateOwner_HookEntry;
+    GW::HookEntry ObjectiveDone_HookEntry;
 
     // --- Backend sync ---
     void ProcessSync();

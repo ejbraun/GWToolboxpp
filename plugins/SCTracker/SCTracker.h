@@ -70,9 +70,6 @@ public:
         // "t1"/"t2"/"t3" once role_skills satisfies one of kRoleCombos, else "unknown". Set once and
         // never overwritten afterward.
         std::string role_hint = "unknown";
-        // Count of completed GW::Constants::SkillID::Resurrect casts (resurrection scroll) by this
-        // member during the run.
-        uint32_t rez_scroll_uses = 0;
         struct ItemDropCount {
             uint32_t id = 0; // model_id (GW::Constants::ItemID) of a kTrackedItems entry
             uint32_t count = 0;
@@ -96,7 +93,8 @@ private:
     void OnWriteToChatLog(const wchar_t* message);
     void OnUpdateAgentState(uint32_t agent_id, uint32_t state);
     void OnAgentUpdateAllegiance(uint32_t agent_id, uint32_t allegiance_bits);
-    void OnSkillUsed(uint32_t agent_id, GW::Constants::SkillID skill_id, uint32_t value_id);
+    void OnSkillUsed(uint32_t agent_id, GW::Constants::SkillID skill_id);
+    void MaybeAssignT1ByElimination();
     void OnItemGeneral(uint32_t item_id, uint32_t model_id);
     void OnItemUpdateOwner(uint32_t item_id, uint32_t owner_agent_id);
     void CaptureParty();

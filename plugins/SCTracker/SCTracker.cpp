@@ -303,13 +303,12 @@ namespace {
     };
 
     // role_hint is set to the role of the first of these combos whose required_skills are all present
-    // in a member's role_skills (checked in this order, so t1 combos are preferred over t3 combos if
-    // both could apply at once - see OnSkillUsed). Radiation Field alone is sufficient for t2; Viper's
-    // Defense is tracked (kTrackedSkillNames) but doesn't itself factor into any combo below.
+    // in a member's role_skills (see OnSkillUsed). t1 is deliberately not determined from skills at
+    // all - of the 3 Ranger/Assassin party members, once t2 and t3 are both found via these combos,
+    // the remaining one is assigned t1 by elimination (see MaybeAssignT1ByElimination). Radiation Field
+    // alone is sufficient for t2; Viper's Defense is tracked (kTrackedSkillNames) but doesn't itself
+    // factor into any combo below.
     const std::vector<RoleCombo> kRoleCombos = {
-        {"t1", {"Shadow of Haste", "Shadow Walk"}},
-        {"t1", {"Winnowing", "Finish Him!"}},
-        {"t1", {"Shadow of Haste", "Recall"}},
         {"t2", {"Radiation Field"}},
         {"t3", {"Shadow of Haste", "Edge of Extinction"}},
         {"t3", {"Shadow of Haste", "Quickening Zephyr"}},
@@ -377,7 +376,7 @@ void SCTracker::Initialize(ImGuiContext* ctx, const ImGuiAllocFns allocator_fns,
                 case GW::Packet::StoC::GenericValueID::skill_finished:
                 case GW::Packet::StoC::GenericValueID::attack_skill_activated:
                 case GW::Packet::StoC::GenericValueID::attack_skill_finished:
-                    OnSkillUsed(packet->agent_id, static_cast<GW::Constants::SkillID>(packet->value), packet->value_id);
+                    OnSkillUsed(packet->agent_id, static_cast<GW::Constants::SkillID>(packet->value));
                     break;
                 default:
                     break;
@@ -396,7 +395,7 @@ void SCTracker::Initialize(ImGuiContext* ctx, const ImGuiAllocFns allocator_fns,
                 case GW::Packet::StoC::GenericValueID::skill_finished:
                 case GW::Packet::StoC::GenericValueID::attack_skill_activated:
                 case GW::Packet::StoC::GenericValueID::attack_skill_finished:
-                    OnSkillUsed(packet->target, static_cast<GW::Constants::SkillID>(packet->value), packet->Value_id);
+                    OnSkillUsed(packet->target, static_cast<GW::Constants::SkillID>(packet->value));
                     break;
                 default:
                     break;
@@ -540,16 +539,11 @@ void SCTracker::OnAgentUpdateAllegiance(const uint32_t agent_id, const uint32_t 
     }
 }
 
-// Also counts GW::Constants::SkillID::Resurrect uses (resurrection scroll - it casts like a spell,
-// with the same activated/finished packets a real skill would send) into
-// PartyMember::rez_scroll_uses, gated to value_id == skill_finished so a single use is counted once
-// (skill_activated/skill_finished both fire per cast; finished is the one that means it completed).
-//
 // For Ranger/Assassin party members (primary profession only), records every kTrackedSkillNames hit
 // into role_skills (deduped), then - only while role_hint is still "unknown" - checks kRoleCombos in
 // order and locks in the role of the first fully-satisfied combo. Once role_hint is set it's never
 // changed again for the rest of the run.
-void SCTracker::OnSkillUsed(const uint32_t agent_id, const GW::Constants::SkillID skill_id, const uint32_t value_id)
+void SCTracker::OnSkillUsed(const uint32_t agent_id, const GW::Constants::SkillID skill_id)
 {
     if (!run_active || skill_id == GW::Constants::SkillID::No_Skill) {
         return;
@@ -559,10 +553,6 @@ void SCTracker::OnSkillUsed(const uint32_t agent_id, const GW::Constants::SkillI
         return;
     }
     PartyMember& member = party_members[member_it->second];
-
-    if (skill_id == GW::Constants::SkillID::Resurrect && value_id == GW::Packet::StoC::GenericValueID::skill_finished) {
-        member.rez_scroll_uses++;
-    }
 
     const auto primary = static_cast<GW::Constants::Profession>(member.primary);
     if (primary != GW::Constants::Profession::Ranger && primary != GW::Constants::Profession::Assassin) {
@@ -583,7 +573,38 @@ void SCTracker::OnSkillUsed(const uint32_t agent_id, const GW::Constants::SkillI
         });
         if (satisfied) {
             member.role_hint = combo.role;
+            MaybeAssignT1ByElimination();
             break;
+        }
+    }
+}
+
+// t1 is never matched from skills (see kRoleCombos' comment) - instead, once both t2 and t3 have been
+// found somewhere among the Ranger/Assassin party members, whichever Ranger/Assassin member(s) are
+// still "unknown" are assigned t1 by elimination. Called after every t2/t3 assignment, so this fires
+// as soon as the second of the two is found, regardless of which order they happen in.
+void SCTracker::MaybeAssignT1ByElimination()
+{
+    bool has_t2 = false;
+    bool has_t3 = false;
+    for (const auto& m : party_members) {
+        if (m.role_hint == "t2") {
+            has_t2 = true;
+        }
+        else if (m.role_hint == "t3") {
+            has_t3 = true;
+        }
+    }
+    if (!has_t2 || !has_t3) {
+        return;
+    }
+    for (auto& m : party_members) {
+        if (m.role_hint != kUnknownRole) {
+            continue;
+        }
+        const auto primary = static_cast<GW::Constants::Profession>(m.primary);
+        if (primary == GW::Constants::Profession::Ranger || primary == GW::Constants::Profession::Assassin) {
+            m.role_hint = "t1";
         }
     }
 }

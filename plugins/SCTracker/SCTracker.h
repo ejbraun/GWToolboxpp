@@ -9,6 +9,7 @@
 // this header, so unique_ptr's deleter is instantiated here too, not just where AsyncRestClient is used.
 #include <RestClient.h>
 
+#include <array>
 #include <deque>
 #include <memory>
 #include <string>
@@ -52,9 +53,17 @@ public:
     void Initialize(ImGuiContext* ctx, ImGuiAllocFns allocator_fns, HMODULE toolbox_dll) override;
     void Terminate() override;
     void Update(float delta) override;
-    // Destroying an in-flight publish_request blocks (joins the background HTTP thread); deferring
-    // unload until it's done avoids freezing the host UI on plugin disable.
-    bool CanTerminate() override { return !publish_request || publish_request->IsCompleted(); }
+    // Renders the post-run failure-report popup only (show_failure_popup gates it) - everything
+    // else about this plugin is background data collection with no always-on window.
+    void Draw(IDirect3DDevice9*) override;
+    // Destroying an in-flight publish_request/submit_request blocks (joins the background HTTP
+    // thread); deferring unload until both are done avoids freezing the host UI on plugin disable.
+    bool CanTerminate() override
+    {
+        return (!publish_request || publish_request->IsCompleted())
+            && (!submit_request || submit_request->IsCompleted())
+            && (!permission_request || permission_request->IsCompleted());
+    }
 
     struct PartyMember {
         std::string name;
@@ -185,4 +194,28 @@ private:
     uint32_t publishing_utc_start = 0; // utc_start of the entry publish_request is currently sending
     uint64_t last_queue_scan_tick = 0;
     uint64_t last_publish_attempt_tick = 0; // backoff timer, only advanced on a failed publish
+
+    // --- Post-run failure reporting ---
+    // Popup opens automatically once a run that ended in wipe/resign finishes publishing and its
+    // server-assigned run_id is known (see ProcessSync). The checkbox list itself is a static,
+    // hardcoded role vocabulary (kFailureReasonRoles in the .cpp) - the plugin has no way to know
+    // which character actually held which role in a given run (that's derived server-side); the
+    // backend rejects any role not actually present in the run and this shows that error inline.
+    //
+    // can_report_failures gates all of it (queried once, right after machine_key loads - see
+    // RequestReportPermission/LoadSettings): defaults false, and none of the rest of this section's
+    // logic runs at all until the server confirms permission - not just "hidden," genuinely skipped.
+    void RequestReportPermission();  // fires permission_request; called once from LoadSettings
+    void ProcessPermissionCheck();   // polls permission_request completion; called from Update
+    void DrawFailurePopup();
+    void ProcessFailureSubmit(); // polls submit_request completion; called from Update
+
+    bool can_report_failures = false;
+    std::unique_ptr<AsyncRestClient> permission_request;
+
+    bool show_failure_popup = false;
+    int64_t pending_failure_run_id = 0;
+    std::array<bool, 11> failure_role_checked{}; // parallel to kFailureReasonRoles
+    std::string failure_submit_error;            // non-empty renders as an inline error in the popup
+    std::unique_ptr<AsyncRestClient> submit_request;
 };

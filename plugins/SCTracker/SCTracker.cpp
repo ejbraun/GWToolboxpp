@@ -75,9 +75,37 @@ struct PublishPayload {
     RemoteObjectiveSet objective;
 };
 
+// Only the fields ProcessSync needs from a successful /upload-run response body - run_id (absent
+// when the upload was silently dropped, e.g. an outdated plugin build) drives whether/which run
+// the failure-report popup opens for. Needs external linkage, same reason as LogEntry.
+struct UploadRunResponseDto {
+    std::optional<int64_t> run_id;
+    bool created = false;
+};
+
+// Body for POST /report-run-failure. Needs external linkage, same reason as LogEntry.
+struct ReportFailurePayload {
+    int64_t run_id = 0;
+    std::vector<std::string> roles;
+};
+
+// Response body for GET /can-report-run-failure. Needs external linkage, same reason as LogEntry.
+struct CanReportFailureResponseDto {
+    bool can_report_failures = false;
+};
+
 namespace {
     constexpr const char* kBaseUrl = "https://gwsctracker.com";
     constexpr const char* kUploadRunsPath = "upload-run";
+    constexpr const char* kReportFailurePath = "report-run-failure";
+    constexpr const char* kCanReportFailurePath = "can-report-run-failure";
+
+    // Static role vocabulary for the failure-report popup, mirroring the backend's RoleDerivation
+    // output exactly (T1-T3 from the plugin's own role_hint, the rest from server-side profession-combo
+    // derivation the plugin has no visibility into) - see SCTracker::failure_role_checked's comment.
+    constexpr std::array<const char*, 11> kFailureReasonRoles = {
+        "T1", "T2", "T3", "T4", "LT", "Spiker", "Derv", "SoS", "Necro", "RangerNecro", "Emo",
+    };
     constexpr uint64_t kSyncScanIntervalMs = 5 * 60 * 1000;      // rescan local files for new entries
     constexpr uint64_t kObjectiveGiveUpTimeoutMs = 10 * 60 * 1000; // publish without a matched objective past this
     constexpr uint64_t kRetryBackoffMs = 60 * 1000;               // wait this long before retrying a failed publish
@@ -723,6 +751,8 @@ void SCTracker::Update(float)
 {
     CaptureParty();
     ProcessSync();
+    ProcessPermissionCheck();
+    ProcessFailureSubmit();
 }
 
 void SCTracker::CaptureParty()
@@ -919,6 +949,20 @@ void SCTracker::ProcessSync()
                 SaveSettings(settings_folder.c_str()); // persist the watermark now, not on the host's cadence
             }
             if (!sync_queue.empty() && sync_queue.front().utc_start == publishing_utc_start) {
+                // Open the failure-report popup for this run before popping it - need its
+                // end_reason, which only lives on the queue entry, not the response body. Gated on
+                // can_report_failures so none of this (including parsing the response body below)
+                // runs at all when the server hasn't confirmed permission - see its declaration.
+                const bool failed = can_report_failures &&
+                    (sync_queue.front().end_reason == "wipe" || sync_queue.front().end_reason == "resign");
+                UploadRunResponseDto response;
+                constexpr glz::opts opts{.error_on_unknown_keys = false};
+                if (failed && !glz::read<opts>(response, publish_request->GetContent()) && response.run_id) {
+                    pending_failure_run_id = *response.run_id;
+                    show_failure_popup = true;
+                    failure_role_checked.fill(false);
+                    failure_submit_error.clear();
+                }
                 sync_queue.pop_front();
             }
         }
@@ -1027,6 +1071,136 @@ void SCTracker::ProcessSync()
     publish_request->ExecuteAsync();
 }
 
+// Fired once from LoadSettings, right after machine_key loads. can_report_failures defaults false
+// and stays false (the safe default - failure-report logic never runs) unless/until this completes
+// successfully with a true response.
+void SCTracker::RequestReportPermission()
+{
+    can_report_failures = false;
+    if (machine_key.empty()) {
+        return;
+    }
+
+    std::string url;
+    ComposeUrl(url, kBaseUrl, kCanReportFailurePath);
+
+    permission_request = std::make_unique<AsyncRestClient>();
+    permission_request->SetUrl(url.c_str());
+    permission_request->SetMethod(HttpMethod::Get);
+    permission_request->SetHeader("X-Machine-Key", machine_key.c_str());
+    permission_request->SetTimeoutSec(10);
+    permission_request->SetConnectTimeoutSec(5);
+    permission_request->SetVerifyPeer(true);
+    permission_request->SetVerifyHost(true);
+    permission_request->ExecuteAsync();
+}
+
+// Polls permission_request completion (called from Update). Any non-success outcome (network
+// error, invalid/revoked key, malformed body) just leaves can_report_failures at its false default.
+void SCTracker::ProcessPermissionCheck()
+{
+    if (!permission_request || !permission_request->IsCompleted()) {
+        return;
+    }
+    if (permission_request->IsSuccessful()) {
+        CanReportFailureResponseDto response;
+        constexpr glz::opts opts{.error_on_unknown_keys = false};
+        if (!glz::read<opts>(response, permission_request->GetContent())) {
+            can_report_failures = response.can_report_failures;
+        }
+    }
+    permission_request.reset();
+}
+
+// Polls submit_request completion (called from Update, same as ProcessSync polls publish_request).
+// On success the popup closes; on failure the truncated response body is kept on screen so the user
+// can see why and adjust their selection before retrying.
+void SCTracker::ProcessFailureSubmit()
+{
+    if (!submit_request || !submit_request->IsCompleted()) {
+        return;
+    }
+    if (submit_request->IsSuccessful()) {
+        show_failure_popup = false;
+        failure_submit_error.clear();
+    }
+    else {
+        std::string body = submit_request->GetContent();
+        if (body.size() > 200) {
+            body.resize(200);
+        }
+        failure_submit_error = std::format("Submit failed: status={} http_code={} body={}",
+                                            submit_request->GetStatusStr(), submit_request->GetStatusCode(), body);
+        AppendLog(std::format("Failure report failed for run {}: {}", pending_failure_run_id, failure_submit_error));
+    }
+    submit_request.reset();
+}
+
+void SCTracker::DrawFailurePopup()
+{
+    // can_report_failures is re-checked here too (not just at the ProcessSync call site that sets
+    // show_failure_popup) in case permission was revoked server-side while the popup sat open.
+    if (!show_failure_popup || !can_report_failures) {
+        return;
+    }
+    if (ImGui::Begin("SCTracker: Run Failure", &show_failure_popup)) {
+        ImGui::TextWrapped("This run ended in a wipe or resign. Which role(s) were at fault?");
+        ImGui::Separator();
+
+        for (size_t i = 0; i < kFailureReasonRoles.size(); i++) {
+            ImGui::Checkbox(kFailureReasonRoles[i], &failure_role_checked[i]);
+        }
+
+        if (ImGui::Button("Unselect All")) {
+            failure_role_checked.fill(false);
+        }
+
+        if (!failure_submit_error.empty()) {
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", failure_submit_error.c_str());
+        }
+
+        ImGui::Separator();
+        const bool submitting = submit_request && submit_request->IsPending();
+        ImGui::BeginDisabled(submitting);
+        if (ImGui::Button("Submit")) {
+            ReportFailurePayload payload{.run_id = pending_failure_run_id};
+            for (size_t i = 0; i < kFailureReasonRoles.size(); i++) {
+                if (failure_role_checked[i]) {
+                    payload.roles.emplace_back(kFailureReasonRoles[i]);
+                }
+            }
+
+            std::string url;
+            ComposeUrl(url, kBaseUrl, kReportFailurePath);
+
+            submit_request = std::make_unique<AsyncRestClient>();
+            submit_request->SetUrl(url.c_str());
+            submit_request->SetMethod(HttpMethod::Post);
+            submit_request->SetHeader("Content-Type", "application/json");
+            submit_request->SetHeader("X-Machine-Key", machine_key.c_str());
+            submit_request->SetPostContent(glz::write_json(payload).value_or(std::string{}), ContentFlag::Copy);
+            submit_request->SetTimeoutSec(10);
+            submit_request->SetConnectTimeoutSec(5);
+            submit_request->SetVerifyPeer(true);
+            submit_request->SetVerifyHost(true);
+            failure_submit_error.clear();
+            submit_request->ExecuteAsync();
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Dismiss")) {
+            show_failure_popup = false;
+        }
+    }
+    ImGui::End();
+}
+
+void SCTracker::Draw(IDirect3DDevice9*)
+{
+    DrawFailurePopup();
+}
+
 void SCTracker::LoadSettings(const wchar_t* folder)
 {
     ToolboxPlugin::LoadSettings(folder);
@@ -1034,6 +1208,7 @@ void SCTracker::LoadSettings(const wchar_t* folder)
     LoadSetting("machine_key", machine_key);
     LoadSetting("last_persisted_utc_start", last_persisted_utc_start);
     PluginUtils::StrCopy(machine_key_buf, machine_key.c_str(), sizeof(machine_key_buf));
+    RequestReportPermission();
 }
 
 void SCTracker::SaveSettings(const wchar_t* folder)
@@ -1063,5 +1238,8 @@ void SCTracker::DrawSettings()
         std::string time_str;
         PluginUtils::TimeToString(last_persisted_utc_start, time_str);
         ImGui::Text("Last synced run: %s", time_str.c_str());
+    }
+    if (!machine_key.empty()) {
+        ImGui::Text("Failure reporting: %s", can_report_failures ? "enabled" : "not permitted for this key");
     }
 }

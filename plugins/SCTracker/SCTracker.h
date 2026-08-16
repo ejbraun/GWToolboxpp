@@ -62,7 +62,8 @@ public:
     {
         return (!publish_request || publish_request->IsCompleted())
             && (!submit_request || submit_request->IsCompleted())
-            && (!permission_request || permission_request->IsCompleted());
+            && (!permission_request || permission_request->IsCompleted())
+            && (!version_check_request || version_check_request->IsCompleted());
     }
 
     struct PartyMember {
@@ -238,4 +239,22 @@ private:
     std::array<bool, 11> failure_role_checked{}; // parallel to kFailureReasonRoles
     std::string failure_submit_error;            // non-empty renders as an inline error in the popup
     std::unique_ptr<AsyncRestClient> submit_request;
+
+    // --- Plugin version check ---
+    // Two complementary mechanisms, both driven by the same plugin_outdated flag: proactively,
+    // RequestLatestPluginVersion (fired once from LoadSettings, no machine key needed - public
+    // endpoint) compares the server's declared latest version against this build's own kPluginVersion
+    // constant before any sync/report attempt is even made. Reactively, every machine-key-
+    // authenticated request (publish_request/submit_request/permission_request) now also sends its
+    // own X-Plugin-Version header, and a 426 response from any of them (see their respective
+    // completion handlers) sets plugin_outdated too - a backstop for the case where this build was
+    // current when the proactive check ran but a newer one has shipped since. Once true,
+    // plugin_outdated disables ProcessSync's publish attempt and the failure-report popup entirely
+    // (not just a warning - see their respective gates) until the plugin is updated and restarted.
+    void RequestLatestPluginVersion(); // fires version_check_request; called once from LoadSettings
+    void ProcessVersionCheck();        // polls version_check_request completion; called from Update
+
+    bool plugin_outdated = false;
+    int latest_known_plugin_version = 0; // 0 until a successful check has actually reported one
+    std::unique_ptr<AsyncRestClient> version_check_request;
 };

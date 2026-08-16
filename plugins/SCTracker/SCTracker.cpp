@@ -1,4 +1,5 @@
 #include "SCTracker.h"
+#include "PluginVersion.generated.h" // kPluginVersion - see cmake/gwtoolboxdll_plugins.cmake
 
 #include <Path.h> // Core: PathGetDocumentsPath / PathGetComputerName
 
@@ -96,11 +97,19 @@ struct CanReportFailureResponseDto {
     bool can_report_failures = false;
 };
 
+// Response body for GET /plugin-version. Needs external linkage, same reason as LogEntry.
+struct PluginVersionResponseDto {
+    int version = 0;
+    std::string compiled_at;
+};
+
 namespace {
     constexpr const char* kBaseUrl = "https://gwsctracker.com";
     constexpr const char* kUploadRunsPath = "upload-run";
     constexpr const char* kReportFailurePath = "report-run-failure";
     constexpr const char* kCanReportFailurePath = "can-report-run-failure";
+    constexpr const char* kPluginVersionPath = "plugin-version";
+    constexpr int kHttpStatusUpgradeRequired = 426;
 
     // Static role vocabulary for the failure-report popup, mirroring the backend's RoleDerivation
     // output exactly (T1-T3 from the plugin's own role_hint, the rest from server-side profession-combo
@@ -793,6 +802,7 @@ void SCTracker::Update(float)
     ProcessSync();
     ProcessPermissionCheck();
     ProcessFailureSubmit();
+    ProcessVersionCheck();
 }
 
 void SCTracker::CaptureParty()
@@ -976,6 +986,9 @@ void SCTracker::ProcessSync()
     if (machine_key.empty()) {
         return; // publishing not configured; local PartyLog_*.json write is still the durable record
     }
+    if (plugin_outdated) {
+        return; // disabled until updated - see plugin_outdated's declaration
+    }
 
     const uint64_t now = GetTickCount64();
 
@@ -1008,6 +1021,12 @@ void SCTracker::ProcessSync()
         }
         else {
             last_publish_attempt_tick = now; // back off before retrying a failed publish
+            if (publish_request->GetStatusCode() == kHttpStatusUpgradeRequired) {
+                plugin_outdated = true;
+                if (!version_check_request) {
+                    RequestLatestPluginVersion(); // refresh the exact version number for the DrawSettings message
+                }
+            }
             std::string body = publish_request->GetContent();
             if (body.size() > 200) {
                 body.resize(200);
@@ -1102,6 +1121,7 @@ void SCTracker::ProcessSync()
     publish_request->SetMethod(HttpMethod::Post);
     publish_request->SetHeader("Content-Type", "application/json");
     publish_request->SetHeader("X-Machine-Key", machine_key.c_str());
+    publish_request->SetHeader("X-Plugin-Version", std::to_string(kPluginVersion).c_str());
     publish_request->SetPostContent(glz::write_json(payload).value_or(std::string{}), ContentFlag::Copy);
     publish_request->SetTimeoutSec(10);
     publish_request->SetConnectTimeoutSec(5);
@@ -1128,6 +1148,7 @@ void SCTracker::RequestReportPermission()
     permission_request->SetUrl(url.c_str());
     permission_request->SetMethod(HttpMethod::Get);
     permission_request->SetHeader("X-Machine-Key", machine_key.c_str());
+    permission_request->SetHeader("X-Plugin-Version", std::to_string(kPluginVersion).c_str());
     permission_request->SetTimeoutSec(10);
     permission_request->SetConnectTimeoutSec(5);
     permission_request->SetVerifyPeer(true);
@@ -1149,6 +1170,12 @@ void SCTracker::ProcessPermissionCheck()
             can_report_failures = response.can_report_failures;
         }
     }
+    else if (permission_request->GetStatusCode() == kHttpStatusUpgradeRequired) {
+        plugin_outdated = true;
+        if (!version_check_request) {
+            RequestLatestPluginVersion();
+        }
+    }
     permission_request.reset();
 }
 
@@ -1165,6 +1192,12 @@ void SCTracker::ProcessFailureSubmit()
         failure_submit_error.clear();
     }
     else {
+        if (submit_request->GetStatusCode() == kHttpStatusUpgradeRequired) {
+            plugin_outdated = true;
+            if (!version_check_request) {
+                RequestLatestPluginVersion();
+            }
+        }
         std::string body = submit_request->GetContent();
         if (body.size() > 200) {
             body.resize(200);
@@ -1176,11 +1209,51 @@ void SCTracker::ProcessFailureSubmit()
     submit_request.reset();
 }
 
+// Fired once from LoadSettings (no machine key needed - GET /plugin-version is public) and again,
+// on demand, from the 426 handlers above if a reactive check fires before this build's own copy has
+// ever completed successfully - guarded by "if (!version_check_request)" at each call site so it
+// never stomps one already in flight.
+void SCTracker::RequestLatestPluginVersion()
+{
+    std::string url;
+    ComposeUrl(url, kBaseUrl, kPluginVersionPath);
+
+    version_check_request = std::make_unique<AsyncRestClient>();
+    version_check_request->SetUrl(url.c_str());
+    version_check_request->SetMethod(HttpMethod::Get);
+    version_check_request->SetTimeoutSec(10);
+    version_check_request->SetConnectTimeoutSec(5);
+    version_check_request->SetVerifyPeer(true);
+    version_check_request->SetVerifyHost(true);
+    version_check_request->ExecuteAsync();
+}
+
+// Polls version_check_request completion (called from Update). Only ever sets plugin_outdated to
+// true, never back to false within the same session - once flagged, it stays flagged until the host
+// restarts the plugin with an updated build (there's no code path that clears it mid-session).
+void SCTracker::ProcessVersionCheck()
+{
+    if (!version_check_request || !version_check_request->IsCompleted()) {
+        return;
+    }
+    if (version_check_request->IsSuccessful()) {
+        PluginVersionResponseDto response;
+        constexpr glz::opts opts{.error_on_unknown_keys = false};
+        if (!glz::read<opts>(response, version_check_request->GetContent())) {
+            latest_known_plugin_version = response.version;
+            if (kPluginVersion < response.version) {
+                plugin_outdated = true;
+            }
+        }
+    }
+    version_check_request.reset();
+}
+
 void SCTracker::DrawFailurePopup()
 {
-    // can_report_failures is re-checked here too (not just at the ProcessSync call site that sets
-    // show_failure_popup) in case permission was revoked server-side while the popup sat open.
-    if (!show_failure_popup || !can_report_failures) {
+    // can_report_failures/plugin_outdated are re-checked here too (not just at the ProcessSync call
+    // site that sets show_failure_popup) in case either changed server-side while the popup sat open.
+    if (!show_failure_popup || !can_report_failures || plugin_outdated) {
         return;
     }
     if (ImGui::Begin("SCTracker: Run Failure", &show_failure_popup)) {
@@ -1219,6 +1292,7 @@ void SCTracker::DrawFailurePopup()
             submit_request->SetMethod(HttpMethod::Post);
             submit_request->SetHeader("Content-Type", "application/json");
             submit_request->SetHeader("X-Machine-Key", machine_key.c_str());
+            submit_request->SetHeader("X-Plugin-Version", std::to_string(kPluginVersion).c_str());
             submit_request->SetPostContent(glz::write_json(payload).value_or(std::string{}), ContentFlag::Copy);
             submit_request->SetTimeoutSec(10);
             submit_request->SetConnectTimeoutSec(5);
@@ -1248,6 +1322,7 @@ void SCTracker::LoadSettings(const wchar_t* folder)
     LoadSetting("machine_key", machine_key);
     LoadSetting("last_persisted_utc_start", last_persisted_utc_start);
     PluginUtils::StrCopy(machine_key_buf, machine_key.c_str(), sizeof(machine_key_buf));
+    RequestLatestPluginVersion(); // no machine key needed - public endpoint, checked before anything else
     RequestReportPermission();
 }
 
@@ -1261,6 +1336,21 @@ void SCTracker::SaveSettings(const wchar_t* folder)
 
 void SCTracker::DrawSettings()
 {
+    if (plugin_outdated) {
+        if (latest_known_plugin_version > 0) {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+                                "This SCTracker build is out of date (yours: %d, latest: %d). Syncing and "
+                                "failure reporting are disabled until you redownload from gwsctracker.com/account.",
+                                kPluginVersion, latest_known_plugin_version);
+        }
+        else {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+                                "This SCTracker build is out of date. Syncing and failure reporting are "
+                                "disabled until you redownload from gwsctracker.com/account.");
+        }
+        ImGui::Separator();
+    }
+
     ImGui::TextWrapped("Logs party composition and run outcome for each speedclear run.");
     if (last_written_utc_start) {
         std::string time_str;

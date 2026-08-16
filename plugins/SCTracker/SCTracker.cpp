@@ -114,9 +114,8 @@ namespace {
     // Static role vocabulary for the failure-report popup, mirroring the backend's RoleDerivation
     // output exactly (T1-T3 from the plugin's own role_hint, the rest from server-side profession-combo
     // derivation the plugin has no visibility into) - see SCTracker::failure_role_checked's comment.
-    // "Nobody" (no player at fault - e.g. a disconnect, lag spike, or bad luck) is not yet confirmed
-    // supported by the backend's RoleDerivation vocabulary - verify server-side handling before
-    // relying on it.
+    // "Nobody" (no player at fault - e.g. a disconnect, lag spike, or bad luck) records a run_failure_reasons
+    // row with no run_participant attached - see FailureReportService.submit on the backend.
     constexpr std::array<const char*, 12> kFailureReasonRoles = {
         "T1", "T2", "T3", "T4", "LT", "Spiker", "Derv", "SoS", "Necro", "RangerNecro", "Emo", "Nobody",
     };

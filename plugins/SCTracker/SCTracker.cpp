@@ -809,6 +809,7 @@ void SCTracker::Update(float)
     ProcessPermissionCheck();
     ProcessFailureSubmit();
     ProcessVersionCheck();
+    ProcessPendingOutdatedNotice();
 }
 
 void SCTracker::CaptureParty()
@@ -1261,10 +1262,22 @@ void SCTracker::NotifyPluginOutdated()
         return; // already notified this session
     }
     plugin_outdated = true;
-    GW::Chat::WriteChat(GW::Chat::Channel::CHANNEL_WARNING,
+    pending_outdated_chat_notice = true;
+}
+
+void SCTracker::ProcessPendingOutdatedNotice()
+{
+    if (!pending_outdated_chat_notice || !GW::Map::GetIsMapLoaded()) {
+        return;
+    }
+    pending_outdated_chat_notice = false;
+    // CHANNEL_WARNING renders as a big center-screen system banner, not a chat-box line - use one of
+    // the GWCA-reserved channels instead (same as GWToolboxdll's own plugin-detected notice in
+    // PluginModule.cpp) so this shows up as normal, scrollable chat text.
+    GW::Chat::WriteChat(GW::Chat::Channel::CHANNEL_GWCA2,
                          L"<c=#FF0000>SCTracker is out of date - syncing and failure reporting are disabled "
                          "until you redownload from gwsctracker.com/account.</c>",
-                         nullptr, true);
+                         L"SCTracker", false);
 }
 
 void SCTracker::DrawFailurePopup()

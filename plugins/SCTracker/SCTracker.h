@@ -267,8 +267,16 @@ private:
     // Sets plugin_outdated (idempotent - a no-op if already set) and writes a one-time local chat
     // warning, since DrawSettings' warning text is easy to miss if the settings tab isn't open.
     void NotifyPluginOutdated();
+    // Called from Update; writes the deferred chat message once GW::Map::GetIsMapLoaded() is true.
+    // See pending_outdated_chat_notice's declaration for why this can't just happen inline.
+    void ProcessPendingOutdatedNotice();
 
     bool plugin_outdated = false;
+    // The very first version check can complete while still at the character-select/loading screen
+    // (the HTTP request doesn't depend on game state), before the chat system exists to write into -
+    // GW::Chat::WriteChat silently no-ops in that state. Set alongside plugin_outdated and cleared by
+    // ProcessPendingOutdatedNotice once the map has actually loaded.
+    bool pending_outdated_chat_notice = false;
     int latest_known_plugin_version = 0; // 0 until a successful check has actually reported one
     std::unique_ptr<AsyncRestClient> version_check_request;
 };

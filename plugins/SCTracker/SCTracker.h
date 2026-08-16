@@ -264,6 +264,9 @@ private:
     // (not just a warning - see their respective gates) until the plugin is updated and restarted.
     void RequestLatestPluginVersion(); // fires version_check_request; called once from LoadSettings
     void ProcessVersionCheck();        // polls version_check_request completion; called from Update
+    // Sets plugin_outdated (idempotent - a no-op if already set) and writes a one-time local chat
+    // warning, since DrawSettings' warning text is easy to miss if the settings tab isn't open.
+    void NotifyPluginOutdated();
 
     bool plugin_outdated = false;
     int latest_known_plugin_version = 0; // 0 until a successful check has actually reported one

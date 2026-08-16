@@ -16,6 +16,7 @@
 #include <GWCA/GameEntities/Player.h>
 #include <GWCA/GameEntities/Skill.h>
 #include <GWCA/Managers/AgentMgr.h>
+#include <GWCA/Managers/ChatMgr.h>
 #include <GWCA/Managers/MapMgr.h>
 #include <GWCA/Managers/PartyMgr.h>
 #include <GWCA/Managers/PlayerMgr.h>
@@ -1247,11 +1248,23 @@ void SCTracker::ProcessVersionCheck()
         if (!glz::read<opts>(response, version_check_request->GetContent())) {
             latest_known_plugin_version = response.version;
             if (kPluginVersion < response.version) {
-                plugin_outdated = true;
+                NotifyPluginOutdated();
             }
         }
     }
     version_check_request.reset();
+}
+
+void SCTracker::NotifyPluginOutdated()
+{
+    if (plugin_outdated) {
+        return; // already notified this session
+    }
+    plugin_outdated = true;
+    GW::Chat::WriteChat(GW::Chat::Channel::CHANNEL_WARNING,
+                         L"<c=#FF0000>SCTracker is out of date - syncing and failure reporting are disabled "
+                         "until you redownload from gwsctracker.com/account.</c>",
+                         nullptr, true);
 }
 
 void SCTracker::DrawFailurePopup()

@@ -315,6 +315,17 @@ namespace {
 
     constexpr const char* kUnknownRole = "unknown";
 
+    // The t1/t2/t3 role archetype is specifically Ranger-primary/Assassin-secondary (2/7) - a Ranger
+    // primary with some other secondary (e.g. Ranger/Necromancer), or an Assassin primary, isn't part
+    // of it, even if they incidentally use some of the same skills for unrelated reasons. Used to gate
+    // role_skills/role_hint tracking in both OnSkillUsed and MaybeAssignT1ByElimination - keep both in
+    // sync with this.
+    bool IsRoleEligible(const uint32_t primary, const uint32_t secondary)
+    {
+        return static_cast<GW::Constants::Profession>(primary) == GW::Constants::Profession::Ranger
+            && static_cast<GW::Constants::Profession>(secondary) == GW::Constants::Profession::Assassin;
+    }
+
     // Every skill relevant to t1/t2/t3 for Ranger/Assassin party members (see OnSkillUsed) -> English
     // display name, hardcoded rather than decoded from the client's EncString, which would follow the
     // client's language setting. Populates PartyMember::role_skills whenever any of these is used,
@@ -605,8 +616,7 @@ void SCTracker::OnSkillUsed(const uint32_t agent_id, const GW::Constants::SkillI
     }
     PartyMember& member = party_members[member_it->second];
 
-    const auto primary = static_cast<GW::Constants::Profession>(member.primary);
-    if (primary != GW::Constants::Profession::Ranger && primary != GW::Constants::Profession::Assassin) {
+    if (!IsRoleEligible(member.primary, member.secondary)) {
         return;
     }
     const auto name_it = kTrackedSkillNames.find(static_cast<uint32_t>(skill_id));
@@ -653,8 +663,7 @@ void SCTracker::MaybeAssignT1ByElimination()
         if (m.role_hint != kUnknownRole) {
             continue;
         }
-        const auto primary = static_cast<GW::Constants::Profession>(m.primary);
-        if (primary == GW::Constants::Profession::Ranger || primary == GW::Constants::Profession::Assassin) {
+        if (IsRoleEligible(m.primary, m.secondary)) {
             m.role_hint = "t1";
         }
     }

@@ -66,7 +66,7 @@ target_link_libraries(SCTracker PRIVATE Core RestClient)
 # this one variable (the compiled-in kPluginVersion constant and the SCTracker.version.json shipped
 # alongside the built dll, both below) stays in sync automatically, so there's nothing else to edit
 # by hand.
-set(SCTRACKER_PLUGIN_VERSION 1 CACHE STRING "SCTracker plugin protocol version (see PluginVersion.generated.h.in)")
+set(SCTRACKER_PLUGIN_VERSION 2 CACHE STRING "SCTracker plugin protocol version (see PluginVersion.generated.h.in)" FORCE)
 
 configure_file(
     "${PROJECT_SOURCE_DIR}/plugins/SCTracker/PluginVersion.generated.h.in"

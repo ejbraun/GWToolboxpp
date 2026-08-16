@@ -1350,6 +1350,12 @@ void SCTracker::DrawSettings()
         }
         ImGui::Separator();
     }
+    else if (latest_known_plugin_version > 0) {
+        // Only claim up-to-date once a version check has actually succeeded (latest_known_plugin_version
+        // stays 0 otherwise, e.g. the request is still in flight or failed) - see ProcessVersionCheck.
+        ImGui::TextColored(ImVec4(0.4f, 0.8f, 0.4f, 1.0f), "SCTracker is up to date (version %d).", kPluginVersion);
+        ImGui::Separator();
+    }
 
     ImGui::TextWrapped("Logs party composition and run outcome for each speedclear run.");
     if (last_written_utc_start) {

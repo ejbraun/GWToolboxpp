@@ -13,10 +13,12 @@
 #include <GWCA/GameEntities/Map.h> // full AreaInfo/RegionType definitions; MapMgr.h only forward-declares them
 #include <GWCA/GameEntities/Party.h>
 #include <GWCA/GameEntities/Player.h>
+#include <GWCA/GameEntities/Skill.h>
 #include <GWCA/Managers/AgentMgr.h>
 #include <GWCA/Managers/MapMgr.h>
 #include <GWCA/Managers/PartyMgr.h>
 #include <GWCA/Managers/PlayerMgr.h>
+#include <GWCA/Managers/SkillbarMgr.h>
 #include <GWCA/Managers/StoCMgr.h>
 // GWCA/Constants/UIMessages.h has no include guard - don't include it directly. UIMgr.h (which does
 // have one) already pulls it in internally; including both causes its content to be pasted twice in
@@ -318,28 +320,25 @@ namespace {
     // The t1/t2/t3 role archetype is specifically Ranger-primary/Assassin-secondary (2/7) - a Ranger
     // primary with some other secondary (e.g. Ranger/Necromancer), or an Assassin primary, isn't part
     // of it, even if they incidentally use some of the same skills for unrelated reasons. Used to gate
-    // role_skills/role_hint tracking in both OnSkillUsed and MaybeAssignT1ByElimination - keep both in
-    // sync with this.
+    // role_skills/role_hint tracking in both OnSkillUsed and ProcessTrackedSkillUse - keep both in sync
+    // with this.
     bool IsRoleEligible(const uint32_t primary, const uint32_t secondary)
     {
         return static_cast<GW::Constants::Profession>(primary) == GW::Constants::Profession::Ranger
             && static_cast<GW::Constants::Profession>(secondary) == GW::Constants::Profession::Assassin;
     }
 
-    // Every skill relevant to t1/t2/t3 for Ranger/Assassin party members (see OnSkillUsed) -> English
-    // display name, hardcoded rather than decoded from the client's EncString, which would follow the
-    // client's language setting. Populates PartyMember::role_skills whenever any of these is used,
-    // independent of whether a role can actually be determined from it (see kRoleCombos).
-    const std::unordered_map<uint32_t, std::string> kTrackedSkillNames = {
-        {static_cast<uint32_t>(GW::Constants::SkillID::Shadow_of_Haste), "Shadow of Haste"},
-        {static_cast<uint32_t>(GW::Constants::SkillID::Shadow_Walk), "Shadow Walk"},
-        {static_cast<uint32_t>(GW::Constants::SkillID::Winnowing), "Winnowing"},
-        {static_cast<uint32_t>(GW::Constants::SkillID::Finish_Him), "Finish Him!"},
-        {static_cast<uint32_t>(GW::Constants::SkillID::Recall), "Recall"},
-        {static_cast<uint32_t>(GW::Constants::SkillID::Radiation_Field), "Radiation Field"},
-        {static_cast<uint32_t>(GW::Constants::SkillID::Vipers_Defense), "Viper's Defense"},
-        {static_cast<uint32_t>(GW::Constants::SkillID::Edge_of_Extinction), "Edge of Extinction"},
-        {static_cast<uint32_t>(GW::Constants::SkillID::Quickening_Zephyr), "Quickening Zephyr"},
+    // Every skill relevant to t2/t3 (see kRoleCombos and OnSkillUsed), matched by decoded English name
+    // rather than SkillID: the SkillID enum has no explicit per-entry numbering (Skills.h just lists
+    // them in order), so its ordinals shift whenever GWCA's header gains or loses an entry anywhere
+    // earlier in the list - a decoded name is stable regardless. Forced to English (see OnSkillUsed's
+    // skill_name_cache population) rather than following the client's language setting. Populates
+    // PartyMember::role_skills whenever the LOCAL PLAYER uses one of these, independent of whether a
+    // role can actually be determined from it.
+    const std::unordered_set<std::string> kTrackedSkillNameSet = {
+        "Shadow of Haste",  "Shadow Walk",       "Winnowing",         "Finish Him!",
+        "Recall",           "Radiation Field",   "Viper's Defense",   "Edge of Extinction",
+        "Quickening Zephyr",
     };
 
     struct RoleCombo {
@@ -348,12 +347,15 @@ namespace {
     };
 
     // role_hint is set to the role of the first of these combos whose required_skills are all present
-    // in a member's role_skills (see OnSkillUsed). t1 is deliberately not determined from skills at
-    // all - of the 3 Ranger/Assassin party members, once t2 and t3 are both found via these combos,
-    // the remaining one is assigned t1 by elimination (see MaybeAssignT1ByElimination). Radiation Field
-    // alone is sufficient for t2; Viper's Defense is tracked (kTrackedSkillNames) but doesn't itself
-    // factor into any combo below.
+    // in the local player's role_skills (see OnSkillUsed) - i.e. this is always about the uploader's
+    // own, reliably-observed skill usage, never a guess about someone else. t1 combos are listed first
+    // so they're preferred if a member's skills happen to satisfy more than one role's combo at once.
+    // Radiation Field alone is sufficient for t2; Viper's Defense is tracked (kTrackedSkillNameSet) but
+    // doesn't itself factor into any combo below.
     const std::vector<RoleCombo> kRoleCombos = {
+        {"t1", {"Shadow of Haste", "Shadow Walk"}},
+        {"t1", {"Winnowing", "Finish Him!"}},
+        {"t1", {"Shadow of Haste", "Recall"}},
         {"t2", {"Radiation Field"}},
         {"t3", {"Shadow of Haste", "Edge of Extinction"}},
         {"t3", {"Shadow of Haste", "Quickening Zephyr"}},
@@ -509,6 +511,10 @@ void SCTracker::OnInstanceLoadInfo(const uint32_t map_id, const bool is_explorab
     dhuum_started = false;
     dhuum_completed = false;
     tracked_item_id_to_model_id.clear();
+    // Not skill_name_cache itself (deliberately persists - see its declaration) - just events still
+    // queued from the previous run. Decoding is near-instant in practice, but without this a very
+    // late-finishing decode could otherwise attribute a previous run's skill use to this new one.
+    pending_role_skill_events.clear();
 }
 
 void SCTracker::OnPartyDefeated()
@@ -601,29 +607,83 @@ void SCTracker::OnObjectiveDone(const uint32_t objective_id)
     dhuum_completed = true;
 }
 
-// For Ranger/Assassin party members (primary profession only), records every kTrackedSkillNames hit
-// into role_skills (deduped), then - only while role_hint is still "unknown" - checks kRoleCombos in
-// order and locks in the role of the first fully-satisfied combo. Once role_hint is set it's never
-// changed again for the rest of the run.
+// Role tracking is local-player-only now (see PartyMember::role_skills' comment) - bails immediately
+// for any other agent, before touching skill_name_cache at all. For the local player, ensures a decode
+// is in flight for skill_id (starting one via skill_name_cache if this is the first time it's been
+// seen at all, this run or any previous one), then either processes immediately (already decoded, e.g.
+// a repeat cast) or queues the event for FlushPendingRoleSkills to pick up once decoding finishes.
 void SCTracker::OnSkillUsed(const uint32_t agent_id, const GW::Constants::SkillID skill_id)
 {
     if (!run_active || skill_id == GW::Constants::SkillID::No_Skill) {
+        return;
+    }
+    if (agent_id != GW::Agents::GetControlledCharacterId()) {
         return;
     }
     const auto member_it = agent_id_to_party_index.find(agent_id);
     if (member_it == agent_id_to_party_index.end()) {
         return;
     }
-    PartyMember& member = party_members[member_it->second];
+    const PartyMember& candidate = party_members[member_it->second];
+    if (!IsRoleEligible(candidate.primary, candidate.secondary)) {
+        return;
+    }
 
+    const auto id = static_cast<uint32_t>(skill_id);
+    auto cache_it = skill_name_cache.find(id);
+    if (cache_it == skill_name_cache.end()) {
+        const GW::Skill* skill_data = GW::SkillbarMgr::GetSkillConstantData(skill_id);
+        auto enc = std::make_unique<PluginUtils::EncString>(skill_data ? skill_data->name : 0u);
+        enc->language(GW::Constants::Language::English);
+        enc->wstring(); // trigger decode
+        cache_it = skill_name_cache.emplace(id, std::move(enc)).first;
+    }
+    if (cache_it->second->IsDecoding()) {
+        pending_role_skill_events.push_back({.skill_id = id});
+        return;
+    }
+    ProcessTrackedSkillUse(cache_it->second->string());
+}
+
+// Drains pending_role_skill_events, calling ProcessTrackedSkillUse for any whose skill_name_cache
+// entry has finished decoding. Called from Update.
+void SCTracker::FlushPendingRoleSkills()
+{
+    std::erase_if(pending_role_skill_events, [this](const PendingRoleSkillEvent& event) {
+        const auto it = skill_name_cache.find(event.skill_id);
+        if (it == skill_name_cache.end() || it->second->IsDecoding()) {
+            return false; // shouldn't happen (the cache entry always exists by the time it's queued),
+                           // but leave it queued rather than drop it if it somehow does
+        }
+        ProcessTrackedSkillUse(it->second->string());
+        return true;
+    });
+}
+
+// Re-resolves the local player's PartyMember entry (rather than being passed one, since OnSkillUsed
+// already guaranteed agent_id == the controlled character before ever queuing this) and re-checks
+// eligibility, since party composition/profession, in principle, could change between OnSkillUsed
+// queuing this and it actually running. Records a kTrackedSkillNameSet hit into role_skills (deduped),
+// then - only while role_hint is still "unknown" - checks kRoleCombos in order and locks in the role of
+// the first fully-satisfied combo. Once role_hint is set it's never changed again for the rest of the
+// run.
+void SCTracker::ProcessTrackedSkillUse(const std::string& skill_name)
+{
+    if (!run_active || !kTrackedSkillNameSet.contains(skill_name)) {
+        return;
+    }
+    const auto member_it = agent_id_to_party_index.find(GW::Agents::GetControlledCharacterId());
+    if (member_it == agent_id_to_party_index.end()) {
+        return;
+    }
+    PartyMember& member = party_members[member_it->second];
     if (!IsRoleEligible(member.primary, member.secondary)) {
         return;
     }
-    const auto name_it = kTrackedSkillNames.find(static_cast<uint32_t>(skill_id));
-    if (name_it == kTrackedSkillNames.end() || std::ranges::contains(member.role_skills, name_it->second)) {
-        return; // not a tracked skill, or already recorded - nothing new to (re-)evaluate
+    if (std::ranges::contains(member.role_skills, skill_name)) {
+        return; // already recorded - nothing new to (re-)evaluate
     }
-    member.role_skills.push_back(name_it->second);
+    member.role_skills.push_back(skill_name);
 
     if (member.role_hint != kUnknownRole) {
         return; // already locked in
@@ -634,37 +694,7 @@ void SCTracker::OnSkillUsed(const uint32_t agent_id, const GW::Constants::SkillI
         });
         if (satisfied) {
             member.role_hint = combo.role;
-            MaybeAssignT1ByElimination();
             break;
-        }
-    }
-}
-
-// t1 is never matched from skills (see kRoleCombos' comment) - instead, once both t2 and t3 have been
-// found somewhere among the Ranger/Assassin party members, whichever Ranger/Assassin member(s) are
-// still "unknown" are assigned t1 by elimination. Called after every t2/t3 assignment, so this fires
-// as soon as the second of the two is found, regardless of which order they happen in.
-void SCTracker::MaybeAssignT1ByElimination()
-{
-    bool has_t2 = false;
-    bool has_t3 = false;
-    for (const auto& m : party_members) {
-        if (m.role_hint == "t2") {
-            has_t2 = true;
-        }
-        else if (m.role_hint == "t3") {
-            has_t3 = true;
-        }
-    }
-    if (!has_t2 || !has_t3) {
-        return;
-    }
-    for (auto& m : party_members) {
-        if (m.role_hint != kUnknownRole) {
-            continue;
-        }
-        if (IsRoleEligible(m.primary, m.secondary)) {
-            m.role_hint = "t1";
         }
     }
 }
@@ -759,6 +789,7 @@ void SCTracker::OnGameSrvTransfer()
 void SCTracker::Update(float)
 {
     CaptureParty();
+    FlushPendingRoleSkills();
     ProcessSync();
     ProcessPermissionCheck();
     ProcessFailureSubmit();

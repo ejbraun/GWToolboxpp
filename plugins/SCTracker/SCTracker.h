@@ -73,11 +73,16 @@ public:
         bool is_hero = false;
         bool is_henchman = false;
         uint32_t deaths = 0; // count of alive->dead transitions seen for this member during the run
-        // English names of every kTrackedSkillNames skill this member (if a Ranger/Assassin primary)
-        // has used at least once during the run, deduped. Empty for everyone else, or if none used.
+        // English names of every kTrackedSkillNameSet skill the LOCAL PLAYER (this run's uploader) has
+        // used at least once during the run, if they're themselves Ranger/Assassin (2/7) - see
+        // OnSkillUsed. Always empty on every other party member's entry: tracking anyone else's skill
+        // usage this way is unreliable (only ever observed when they're within compass range of the
+        // uploader), so the client doesn't attempt it at all. Deduped.
         std::vector<std::string> role_skills;
         // "t1"/"t2"/"t3" once role_skills satisfies one of kRoleCombos, else "unknown". Set once and
-        // never overwritten afterward.
+        // never overwritten afterward. Like role_skills, only ever non-"unknown" on the uploader's own
+        // entry - this is the uploader's own role, self-determined from their own skill usage, never a
+        // guess about someone else.
         std::string role_hint = "unknown";
         struct ItemDropCount {
             uint32_t id = 0; // model_id (GW::Constants::ItemID) of a kTrackedItems entry
@@ -104,7 +109,8 @@ private:
     void OnAgentUpdateAllegiance(uint32_t agent_id, uint32_t allegiance_bits);
     void OnObjectiveDone(uint32_t objective_id);
     void OnSkillUsed(uint32_t agent_id, GW::Constants::SkillID skill_id);
-    void MaybeAssignT1ByElimination();
+    void FlushPendingRoleSkills();
+    void ProcessTrackedSkillUse(const std::string& skill_name);
     void OnItemGeneral(uint32_t item_id, uint32_t model_id);
     void OnItemUpdateOwner(uint32_t item_id, uint32_t owner_agent_id);
     void CaptureParty();
@@ -134,6 +140,20 @@ private:
     // same bit), so a later resurrection doesn't get double-counted and a second death after that does.
     std::unordered_map<uint32_t, size_t> agent_id_to_party_index;
     std::vector<bool> party_member_currently_dead;
+
+    // skill_id -> decoded English name, populated lazily (once per distinct skill_id the local player
+    // ever uses, not per cast) so role tracking matches by name instead of the numeric SkillID enum
+    // ordinal, which shifts whenever GWCA's Skills.h header gains/loses an entry anywhere earlier in
+    // the list. Persists across runs deliberately (skill names don't change mid-session) rather than
+    // being reset in OnInstanceLoadInfo.
+    std::unordered_map<uint32_t, std::unique_ptr<PluginUtils::EncString>> skill_name_cache;
+    struct PendingRoleSkillEvent {
+        uint32_t skill_id = 0; // key into skill_name_cache
+    };
+    // OnSkillUsed calls for a skill_id whose name hadn't finished decoding yet when it fired; drained
+    // by FlushPendingRoleSkills (called from Update) once its cache lookup is ready. Always about the
+    // local player - OnSkillUsed only ever queues an event after confirming that.
+    std::vector<PendingRoleSkillEvent> pending_role_skill_events;
 
     // item_id -> model_id for tracked-item drops seen via ItemGeneral but not yet resolved to an
     // owner. Erased once OnItemUpdateOwner counts it (or the owner isn't a tracked party member), so a

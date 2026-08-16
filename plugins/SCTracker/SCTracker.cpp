@@ -120,6 +120,9 @@ namespace {
     constexpr std::array<const char*, 12> kFailureReasonRoles = {
         "T1", "T2", "T3", "T4", "LT", "Spiker", "Derv", "SoS", "Necro", "RangerNecro", "Emo", "Nobody",
     };
+    // "Nobody" must stay last in kFailureReasonRoles - DrawFailurePopup uses this index to enforce
+    // mutual exclusivity between it and every other reason (checking one clears the other(s)).
+    constexpr size_t kNobodyReasonIndex = kFailureReasonRoles.size() - 1;
     constexpr uint64_t kSyncScanIntervalMs = 5 * 60 * 1000;      // rescan local files for new entries
     constexpr uint64_t kObjectiveGiveUpTimeoutMs = 10 * 60 * 1000; // publish without a matched objective past this
     constexpr uint64_t kRetryBackoffMs = 60 * 1000;               // wait this long before retrying a failed publish
@@ -1265,7 +1268,20 @@ void SCTracker::DrawFailurePopup()
         ImGui::Separator();
 
         for (size_t i = 0; i < kFailureReasonRoles.size(); i++) {
-            ImGui::Checkbox(kFailureReasonRoles[i], &failure_role_checked[i]);
+            // "Nobody" is mutually exclusive with every other reason: checking it clears the rest,
+            // and checking any other reason clears it.
+            if (ImGui::Checkbox(kFailureReasonRoles[i], &failure_role_checked[i]) && failure_role_checked[i]) {
+                if (i == kNobodyReasonIndex) {
+                    for (size_t j = 0; j < failure_role_checked.size(); j++) {
+                        if (j != i) {
+                            failure_role_checked[j] = false;
+                        }
+                    }
+                }
+                else {
+                    failure_role_checked[kNobodyReasonIndex] = false;
+                }
+            }
         }
 
         if (ImGui::Button("Unselect All")) {

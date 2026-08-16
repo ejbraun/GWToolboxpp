@@ -114,8 +114,11 @@ namespace {
     // Static role vocabulary for the failure-report popup, mirroring the backend's RoleDerivation
     // output exactly (T1-T3 from the plugin's own role_hint, the rest from server-side profession-combo
     // derivation the plugin has no visibility into) - see SCTracker::failure_role_checked's comment.
-    constexpr std::array<const char*, 11> kFailureReasonRoles = {
-        "T1", "T2", "T3", "T4", "LT", "Spiker", "Derv", "SoS", "Necro", "RangerNecro", "Emo",
+    // "Nobody" (no player at fault - e.g. a disconnect, lag spike, or bad luck) is not yet confirmed
+    // supported by the backend's RoleDerivation vocabulary - verify server-side handling before
+    // relying on it.
+    constexpr std::array<const char*, 12> kFailureReasonRoles = {
+        "T1", "T2", "T3", "T4", "LT", "Spiker", "Derv", "SoS", "Necro", "RangerNecro", "Emo", "Nobody",
     };
     constexpr uint64_t kSyncScanIntervalMs = 5 * 60 * 1000;      // rescan local files for new entries
     constexpr uint64_t kObjectiveGiveUpTimeoutMs = 10 * 60 * 1000; // publish without a matched objective past this
@@ -1256,8 +1259,9 @@ void SCTracker::DrawFailurePopup()
     if (!show_failure_popup || !can_report_failures || plugin_outdated) {
         return;
     }
+    ImGui::SetNextWindowSize(ImVec2(420.0f, 480.0f), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("SCTracker: Run Failure", &show_failure_popup)) {
-        ImGui::TextWrapped("This run ended in a wipe or resign. Which role(s) were at fault?");
+        ImGui::TextWrapped("The most recent run ended in a wipe or resign. Which role(s) were at fault?");
         ImGui::Separator();
 
         for (size_t i = 0; i < kFailureReasonRoles.size(); i++) {

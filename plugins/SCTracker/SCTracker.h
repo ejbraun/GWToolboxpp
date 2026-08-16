@@ -56,6 +56,17 @@ public:
     // Renders the post-run failure-report popup only (show_failure_popup gates it) - everything
     // else about this plugin is background data collection with no always-on window.
     void Draw(IDirect3DDevice9*) override;
+    // PluginModule::Draw only calls Draw() at all when this returns a non-null pointer to a true
+    // bool (GWToolboxdll/Modules/PluginModule.cpp) - without an override here (base default is
+    // nullptr), Draw()/DrawFailurePopup() never runs, so the popup can never render regardless of
+    // show_failure_popup. Aliasing that same flag means the host only calls Draw() when there's
+    // actually something to show, and ImGui::Begin's close button (which writes through this same
+    // pointer) naturally stops it being called again once dismissed. Returning nullptr while
+    // can_report_failures is false also hides the plugin list's manual "Visible" checkbox
+    // (PluginModule.cpp's DrawSettings, `if (plugin->instance->GetVisiblePtr())`) - otherwise an
+    // unpermitted user could still tick that box, and though DrawFailurePopup's own permission check
+    // means nothing would actually render, the checkbox would sit there checked and inert.
+    [[nodiscard]] bool* GetVisiblePtr() override { return can_report_failures ? &show_failure_popup : nullptr; }
     // Destroying an in-flight publish_request/submit_request blocks (joins the background HTTP
     // thread); deferring unload until both are done avoids freezing the host UI on plugin disable.
     bool CanTerminate() override
@@ -236,7 +247,7 @@ private:
 
     bool show_failure_popup = false;
     int64_t pending_failure_run_id = 0;
-    std::array<bool, 11> failure_role_checked{}; // parallel to kFailureReasonRoles
+    std::array<bool, 12> failure_role_checked{}; // parallel to kFailureReasonRoles
     std::string failure_submit_error;            // non-empty renders as an inline error in the popup
     std::unique_ptr<AsyncRestClient> submit_request;
 

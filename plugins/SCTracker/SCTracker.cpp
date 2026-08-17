@@ -11,7 +11,6 @@
 #include <GWCA/Context/CharContext.h>
 #include <GWCA/GameEntities/Agent.h>
 #include <GWCA/GameEntities/Hero.h> // full HeroInfo definition; PartyMgr.h only forward-declares it
-#include <GWCA/GameEntities/Map.h> // full AreaInfo/RegionType definitions; MapMgr.h only forward-declares them
 #include <GWCA/GameEntities/Party.h>
 #include <GWCA/GameEntities/Player.h>
 #include <GWCA/GameEntities/Skill.h>
@@ -140,51 +139,12 @@ namespace {
     // kDhuumHostileAllegianceBits above.
     constexpr uint32_t kDhuumObjectiveId = 157;
 
-    // The exact set of GW::Constants::MapID values ObjectiveTimerWindow::AddObjectiveSet()'s switch
-    // statement matches (GWToolboxdll/Windows/ObjectiveTimerWindow.cpp) - i.e. every area it will
-    // actually create an ObjectiveSet for. Everything else (random missions, vanquishes, etc.) is
-    // skipped entirely: no capture, no resign/wipe hooks, no local write, since it could never find a
-    // matching objective entry anyway. For multi-level dungeons only the entry level's id is listed,
-    // matching the switch itself - later levels are tracked by the same already-active run, not by
-    // this check firing again. DoA is deliberately excluded (see OnInstanceLoadInfo).
-    //
-    // NB: this is a manually maintained copy. If GWToolboxdll adds or removes a tracked area, this
-    // list needs updating to match, or a newly-tracked area would get silently skipped here.
+    // Only The Underworld is supported right now - the backend doesn't handle any other map id yet.
+    // This used to mirror the full set ObjectiveTimerWindow::AddObjectiveSet() tracks
+    // (GWToolboxdll/Windows/ObjectiveTimerWindow.cpp); re-expand from that switch statement (elite
+    // areas, dungeons, ToPK) once the backend supports them again.
     const std::unordered_set<uint32_t> kTrackedMapIds = {
-        // elite areas
-        static_cast<uint32_t>(GW::Constants::MapID::Urgozs_Warren),
-        static_cast<uint32_t>(GW::Constants::MapID::The_Deep),
-        static_cast<uint32_t>(GW::Constants::MapID::The_Fissure_of_Woe),
         static_cast<uint32_t>(GW::Constants::MapID::The_Underworld),
-        // dungeons - 1 level
-        static_cast<uint32_t>(GW::Constants::MapID::Ooze_Pit),
-        static_cast<uint32_t>(GW::Constants::MapID::Fronis_Irontoes_Lair_mission),
-        static_cast<uint32_t>(GW::Constants::MapID::Secret_Lair_of_the_Snowmen),
-        // dungeons - 2 levels (entry map id only)
-        static_cast<uint32_t>(GW::Constants::MapID::Sepulchre_of_Dragrimmar_Level_1),
-        static_cast<uint32_t>(GW::Constants::MapID::Bogroot_Growths_Level_1),
-        static_cast<uint32_t>(GW::Constants::MapID::Arachnis_Haunt_Level_1),
-        // dungeons - 3 levels (entry map id only)
-        static_cast<uint32_t>(GW::Constants::MapID::Catacombs_of_Kathandrax_Level_1),
-        static_cast<uint32_t>(GW::Constants::MapID::Rragars_Menagerie_Level_1),
-        static_cast<uint32_t>(GW::Constants::MapID::Cathedral_of_Flames_Level_1),
-        static_cast<uint32_t>(GW::Constants::MapID::Darkrime_Delves_Level_1),
-        static_cast<uint32_t>(GW::Constants::MapID::Ravens_Point_Level_1),
-        static_cast<uint32_t>(GW::Constants::MapID::Vloxen_Excavations_Level_1),
-        static_cast<uint32_t>(GW::Constants::MapID::Bloodstone_Caves_Level_1),
-        static_cast<uint32_t>(GW::Constants::MapID::Shards_of_Orr_Level_1),
-        static_cast<uint32_t>(GW::Constants::MapID::Oolas_Lab_Level_1),
-        static_cast<uint32_t>(GW::Constants::MapID::Heart_of_the_Shiverpeaks_Level_1),
-        static_cast<uint32_t>(GW::Constants::MapID::Forsaken_Tunnels_Level1),
-        static_cast<uint32_t>(GW::Constants::MapID::Forsaken_Tunnels_Presearing_Level1),
-        // dungeons - 5 levels (entry map id only)
-        static_cast<uint32_t>(GW::Constants::MapID::Frostmaws_Burrows_Level_1),
-        // dungeons - irregular
-        static_cast<uint32_t>(GW::Constants::MapID::Slavers_Exile_Level_5),
-        // Tomb of the Primeval Kings (ToPK); ObjectiveTimerWindow additionally requires
-        // GW::Map::GetCurrentMapInfo()->type == GW::RegionType::ExplorableZone to disambiguate
-        // from the PvP-arena variant of this same map id - replicated in OnInstanceLoadInfo.
-        static_cast<uint32_t>(GW::Constants::MapID::The_Underworld_PvP),
     };
 
     std::filesystem::path GetRunsFolder()
@@ -503,14 +463,6 @@ void SCTracker::OnInstanceLoadInfo(const uint32_t map_id, const bool is_explorab
 {
     if (!is_explorable || !kTrackedMapIds.contains(map_id)) {
         return; // not an area ObjectiveTimerWindow tracks; skip capture entirely for this instance
-    }
-    if (map_id == static_cast<uint32_t>(GW::Constants::MapID::The_Underworld_PvP)) {
-        // Same map id is shared with a PvP arena variant; ObjectiveTimerWindow only tracks the
-        // ToPK (explorable) one.
-        const GW::AreaInfo* info = GW::Map::GetCurrentMapInfo();
-        if (!info || info->type != GW::RegionType::ExplorableZone) {
-            return;
-        }
     }
     next_utc_start = static_cast<uint32_t>(time(nullptr));
     next_map_id = map_id;

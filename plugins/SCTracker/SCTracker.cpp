@@ -125,6 +125,7 @@ namespace {
     constexpr uint64_t kSyncScanIntervalMs = 5 * 60 * 1000;      // rescan local files for new entries
     constexpr uint64_t kObjectiveGiveUpTimeoutMs = 10 * 60 * 1000; // publish without a matched objective past this
     constexpr uint64_t kRetryBackoffMs = 60 * 1000;               // wait this long before retrying a failed publish
+    constexpr uint64_t kFailureVoteWindowMs = 60 * 1000; // how long the failure-report popup stays open
     constexpr uint32_t kDeathTrackingGraceSec = 60; // ignore deaths in the first minute of the instance
 
     // Marks Dhuum's agent turning hostile (GAME_SMSG_AGENT_UPDATE_ALLEGIANCE). Same signal
@@ -975,6 +976,7 @@ void SCTracker::ProcessSync()
                     show_failure_popup = true;
                     failure_role_checked.fill(false);
                     failure_submit_error.clear();
+                    failure_popup_opened_tick = GetTickCount64();
                 }
                 sync_queue.pop_front();
             }
@@ -1149,6 +1151,7 @@ void SCTracker::ProcessFailureSubmit()
     }
     if (submit_request->IsSuccessful()) {
         show_failure_popup = false;
+        failure_popup_opened_tick = 0;
         failure_submit_error.clear();
     }
     else {
@@ -1240,11 +1243,36 @@ void SCTracker::DrawFailurePopup()
     if (!show_failure_popup || !can_report_failures || plugin_outdated) {
         return;
     }
+
+    // Auto-close kFailureVoteWindowMs after the auto-trigger opened it - a vote submitted long after
+    // the run in question is no longer useful. Only applies when the timer is actually running
+    // (failure_popup_opened_tick != 0); a manually-opened popup (see its member comment) has no
+    // timer to expire and stays open until Dismissed.
+    const uint64_t now = GetTickCount64();
+    const bool timer_active = failure_popup_opened_tick != 0 && (now - failure_popup_opened_tick) < kFailureVoteWindowMs;
+    if (failure_popup_opened_tick != 0 && !timer_active) {
+        show_failure_popup = false;
+        failure_popup_opened_tick = 0;
+        return;
+    }
+
     ImGui::SetNextWindowSize(ImVec2(420.0f, 480.0f), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("SCTracker: Run Failure", &show_failure_popup)) {
-        ImGui::TextWrapped("The most recent run ended in a wipe or resign. Which role(s) were at fault?");
+        ImGui::TextWrapped("The most recent run ended in a wipe or resign. Vote for which role(s) you believe "
+                            "were at fault - votes from everyone in the party who reports get combined "
+                            "server-side to determine the actual cause.");
+        if (timer_active) {
+            const uint64_t remaining_sec = (kFailureVoteWindowMs - (now - failure_popup_opened_tick)) / 1000;
+            ImGui::Text("Voting closes in %llus", static_cast<unsigned long long>(remaining_sec));
+        }
+        else {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
+                                "No active vote - this popup was opened manually, not triggered by a run "
+                                "failure. Voting is disabled.");
+        }
         ImGui::Separator();
 
+        ImGui::BeginDisabled(!timer_active);
         for (size_t i = 0; i < kFailureReasonRoles.size(); i++) {
             // "Nobody" is mutually exclusive with every other reason: checking it clears the rest,
             // and checking any other reason clears it.
@@ -1265,6 +1293,7 @@ void SCTracker::DrawFailurePopup()
         if (ImGui::Button("Unselect All")) {
             failure_role_checked.fill(false);
         }
+        ImGui::EndDisabled();
 
         if (!failure_submit_error.empty()) {
             ImGui::Separator();
@@ -1273,8 +1302,8 @@ void SCTracker::DrawFailurePopup()
 
         ImGui::Separator();
         const bool submitting = submit_request && submit_request->IsPending();
-        ImGui::BeginDisabled(submitting);
-        if (ImGui::Button("Submit")) {
+        ImGui::BeginDisabled(submitting || !timer_active);
+        if (ImGui::Button("Submit Vote")) {
             ReportFailurePayload payload{.run_id = pending_failure_run_id};
             for (size_t i = 0; i < kFailureReasonRoles.size(); i++) {
                 if (failure_role_checked[i]) {
@@ -1303,6 +1332,7 @@ void SCTracker::DrawFailurePopup()
         ImGui::SameLine();
         if (ImGui::Button("Dismiss")) {
             show_failure_popup = false;
+            failure_popup_opened_tick = 0;
         }
     }
     ImGui::End();

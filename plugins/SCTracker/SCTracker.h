@@ -250,6 +250,12 @@ private:
     std::array<bool, 12> failure_role_checked{}; // parallel to kFailureReasonRoles
     std::string failure_submit_error;            // non-empty renders as an inline error in the popup
     std::unique_ptr<AsyncRestClient> submit_request;
+    // GetTickCount64() when the auto-trigger (ProcessSync) opened the popup; 0 means no vote window
+    // is active. DrawFailurePopup auto-closes the popup kFailureVoteWindowMs after this, and disables
+    // voting entirely (Dismiss still works) if this is 0 - i.e. the popup was opened manually via the
+    // plugin list's "Visible" checkbox (GetVisiblePtr) rather than by a real failed-run trigger, so
+    // there's nothing legitimate to vote on.
+    uint64_t failure_popup_opened_tick = 0;
 
     // --- Plugin version check ---
     // Two complementary mechanisms, both driven by the same plugin_outdated flag: proactively,

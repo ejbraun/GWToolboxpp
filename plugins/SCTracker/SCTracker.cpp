@@ -342,11 +342,12 @@ namespace {
     // ItemMgr.h) key on instead, and what's sent to the backend (PartyMember::ItemDropCount::id) - the
     // backend is expected to already have its own id -> display name mapping.
     const std::unordered_set<uint32_t> kTrackedItems = {
-        GW::Constants::ItemID::GlobofEctoplasm, // Glob of Ectoplasm
-        GW::Constants::ItemID::VoltaicSpear,    // Voltaic Spear
-        GW::Constants::ItemID::DSR,             // DSR
-        GW::Constants::ItemID::EternalBlade,    // Eternal Blade
-        GW::Constants::ItemID::MiniDhuum,       // Mini Dhuum
+        GW::Constants::ItemID::GlobofEctoplasm,  // Glob of Ectoplasm
+        GW::Constants::ItemID::VoltaicSpear,     // Voltaic Spear
+        GW::Constants::ItemID::DSR,              // DSR
+        GW::Constants::ItemID::EternalBlade,     // Eternal Blade
+        GW::Constants::ItemID::MiniDhuum,        // Mini Dhuum
+        GW::Constants::ItemID::MiniSmiteCrawler, // Miniature Smite Crawler
     };
 
     // Encoded prefix for the "<player> has resigned." system chat message. Not human-readable text -

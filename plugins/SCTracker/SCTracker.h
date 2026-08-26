@@ -10,8 +10,8 @@
 #include <RestClient.h>
 
 #include <array>
-#include <deque>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -32,7 +32,7 @@ namespace GW::Constants {
 //     GWToolboxdll's own ObjectiveTimerRuns_*.json entries for the same run.
 //   - Only for instances GWToolboxdll's ObjectiveTimerWindow actually tracks (kTrackedMapIds) - random
 //     missions/vanquishes/etc. are skipped entirely, since they'd never correlate with anything.
-//   - Periodically (SyncQueueEntry) reads both its own local PartyLog_*.json and GWToolboxdll's
+//   - Periodically (see PendingSyncEntry) reads both its own local PartyLog_*.json and GWToolboxdll's
 //     ObjectiveTimerRuns_*.json - the durable, network-independent source of truth - and publishes the
 //     combined party+objective payload for each run to the backend, machine-key authenticated. Only
 //     advances the persisted watermark on confirmed success, so a slow GWToolboxdll write, a network
@@ -53,20 +53,20 @@ public:
     void Initialize(ImGuiContext* ctx, ImGuiAllocFns allocator_fns, HMODULE toolbox_dll) override;
     void Terminate() override;
     void Update(float delta) override;
-    // Renders the post-run failure-report popup only (show_failure_popup gates it) - everything
-    // else about this plugin is background data collection with no always-on window.
+    // Renders the post-run vote popup only (show_vote_popup gates it) - everything else about this
+    // plugin is background data collection with no always-on window.
     void Draw(IDirect3DDevice9*) override;
     // PluginModule::Draw only calls Draw() at all when this returns a non-null pointer to a true
     // bool (GWToolboxdll/Modules/PluginModule.cpp) - without an override here (base default is
-    // nullptr), Draw()/DrawFailurePopup() never runs, so the popup can never render regardless of
-    // show_failure_popup. Aliasing that same flag means the host only calls Draw() when there's
+    // nullptr), Draw()/DrawVotePopup() never runs, so the popup can never render regardless of
+    // show_vote_popup. Aliasing that same flag means the host only calls Draw() when there's
     // actually something to show, and ImGui::Begin's close button (which writes through this same
     // pointer) naturally stops it being called again once dismissed. Returning nullptr while
     // can_report_failures is false also hides the plugin list's manual "Visible" checkbox
     // (PluginModule.cpp's DrawSettings, `if (plugin->instance->GetVisiblePtr())`) - otherwise an
-    // unpermitted user could still tick that box, and though DrawFailurePopup's own permission check
+    // unpermitted user could still tick that box, and though DrawVotePopup's own permission check
     // means nothing would actually render, the checkbox would sit there checked and inert.
-    [[nodiscard]] bool* GetVisiblePtr() override { return can_report_failures ? &show_failure_popup : nullptr; }
+    [[nodiscard]] bool* GetVisiblePtr() override { return can_report_failures ? &show_vote_popup : nullptr; }
     // Destroying an in-flight publish_request/submit_request blocks (joins the background HTTP
     // thread); deferring unload until both are done avoids freezing the host UI on plugin disable.
     bool CanTerminate() override
@@ -104,13 +104,25 @@ public:
         // Reflects initial loot reservation (GAME_SMSG_ITEM_UPDATE_OWNER), not confirmed pickup - see
         // OnItemUpdateOwner.
         std::vector<ItemDropCount> item_drops;
+        // Net Ghastly Summoning Stone (GW::Constants::ItemID::GhastlyStone, model_id 32557; confirmed
+        // via live capture 2026-08-26) count for this member: -1 per stone they manually dropped, +1
+        // per stone they picked up (quantity-weighted on both sides), summed across the run.
+        // std::nullopt (serializes as JSON null) means this member never participated at all -
+        // deliberately distinct from a real 0 (e.g. dropped one stone and later picked their own back
+        // up uncontested - a legitimate zero-sum outcome for an actual participant). Both drop and
+        // pickup are resolved entirely from their own chat message in OnWriteToChatLog (item identity
+        // via a raw substring match, exact quantity via an embedded numeric parameter - see
+        // MessageContainsGhastlySummoningStone/GetGamblingStoneQuantity in SCTracker.cpp) rather than
+        // via GAME_SMSG_ITEM_UPDATE_OWNER: that packet was confirmed via live testing to not fire at
+        // all for a self-pickup of a self-dropped item, so OnItemUpdateOwner is not involved here.
+        std::optional<int32_t> gambling_stone_net;
     };
 
 private:
     // Only tracks instances GWToolboxdll's own ObjectiveTimerWindow would create an ObjectiveSet for
     // (see kTrackedMapIds) - skips capture/hooks entirely for everything else (random missions,
-    // vanquishes, etc.), so the sync queue never fills up with entries that can never find a matching
-    // objective log. DoA is deliberately excluded: it's not in ObjectiveTimerWindow's map_id switch at
+    // vanquishes, etc.), so ProcessSync never has to hold/wait out an entry that can never find a
+    // matching objective log. DoA is deliberately excluded: it's not in ObjectiveTimerWindow's map_id switch at
     // all (it's gated on a different packet's map_fileID, since DoA shares its map_id with the solo
     // Mallyx mission) - out of scope here per explicit instruction.
     void OnInstanceLoadInfo(uint32_t map_id, bool is_explorable);
@@ -125,6 +137,10 @@ private:
     void ProcessTrackedSkillUse(const std::string& skill_name);
     void OnItemGeneral(uint32_t item_id, uint32_t model_id);
     void OnItemUpdateOwner(uint32_t item_id, uint32_t owner_agent_id);
+    // Single choke point for both the drop and pickup sides of the gambling-stone ritual, both
+    // resolved entirely from their own chat message - see PartyMember::gambling_stone_net and
+    // OnWriteToChatLog.
+    void AddGamblingStoneDelta(size_t party_index, int32_t delta);
     void CaptureParty();
     void WriteLogEntry(uint32_t utc_start, uint32_t map_id, const std::string& character_name,
                         const std::string& end_reason, const std::vector<PartyMember>& members);
@@ -203,7 +219,23 @@ private:
 
     // --- Backend sync ---
     void ProcessSync();
-    void RefreshSyncQueue();
+
+    struct PendingSyncEntry {
+        uint32_t utc_start = 0;
+        uint32_t map_id = 0;
+        std::string character_name;
+        std::string end_reason;
+        std::vector<PartyMember> party_members;
+        // GetTickCount64() when this run was first discovered by FindNextPendingEntry; set once and
+        // never touched again while held - this is what makes the give-up-waiting timeout correct.
+        uint64_t first_seen_tick = 0;
+    };
+    // Returns the single oldest not-yet-published run across today's/yesterday's PartyLog_*.json
+    // files (or nullopt), i.e. the next candidate for pending_sync. Called when pending_sync is
+    // empty (the periodic scan gate in ProcessSync) or immediately after resolving the previously-
+    // held entry, so several already-known-disqualified runs can still drain within one
+    // ProcessSync() tick instead of one per scan interval.
+    std::optional<PendingSyncEntry> FindNextPendingEntry();
 
     std::string machine_key;
     char machine_key_buf[128] = "";
@@ -213,49 +245,60 @@ private:
                                             // can persist the advanced watermark immediately, not just on
                                             // whatever cadence the host calls SaveSettings.
 
-    struct SyncQueueEntry {
-        uint32_t utc_start = 0;
-        uint32_t map_id = 0;
-        std::string character_name;
-        std::string end_reason;
-        std::vector<PartyMember> party_members;
-        uint64_t first_seen_tick = 0; // GetTickCount64() when first queued; for the give-up-waiting timeout
-    };
-    std::deque<SyncQueueEntry> sync_queue;
+    // At most one run is ever unpublished at a time in practice (a run finishes every few minutes
+    // and publish is fast), and processing is always strictly oldest-first by utc_start - so a
+    // scalar holding the single oldest unresolved entry is sufficient; no backlog/ordering container
+    // is needed.
+    std::optional<PendingSyncEntry> pending_sync;
     std::unique_ptr<AsyncRestClient> publish_request;
     uint32_t publishing_utc_start = 0; // utc_start of the entry publish_request is currently sending
     uint64_t last_queue_scan_tick = 0;
     uint64_t last_publish_attempt_tick = 0; // backoff timer, only advanced on a failed publish
 
-    // --- Post-run failure reporting ---
-    // Popup opens automatically once a run that ended in wipe/resign finishes publishing and its
-    // server-assigned run_id is known (see ProcessSync). The checkbox list itself is a static,
-    // hardcoded role vocabulary (kFailureReasonRoles in the .cpp) - the plugin has no way to know
-    // which character actually held which role in a given run (that's derived server-side); the
-    // backend rejects any role not actually present in the run and this shows that error inline.
+    // --- Post-run voting ---
+    // Two vote kinds share one popup/trigger/defer/cancel pipeline: Failure (wipe/resign, blame a
+    // role) and Mvp (completed, credit a role) - both use the same role vocabulary/UI mechanics
+    // (kVoteRoles in the .cpp). Popup opens immediately at run-end from OnGameSrvTransfer's locally-
+    // known end_reason (not from ProcessSync/GWToolboxdll's delayed file) - see OpenVote. Submission
+    // is deferred until the server-assigned run_id is known (see ProcessSync's correlation block and
+    // FireVoteSubmit), since run_id doesn't exist until the run publishes successfully.
     //
-    // can_report_failures gates all of it (queried once, right after machine_key loads - see
-    // RequestReportPermission/LoadSettings): defaults false, and none of the rest of this section's
-    // logic runs at all until the server confirms permission - not just "hidden," genuinely skipped.
+    // can_report_failures gates all of it, same as before - deliberately NOT renamed even though it
+    // now gates two vote kinds (reusing the existing can-report-run-failure permission check, no new
+    // permission endpoint).
     void RequestReportPermission();  // fires permission_request; called once from LoadSettings
     void ProcessPermissionCheck();   // polls permission_request completion; called from Update
-    void DrawFailurePopup();
-    void ProcessFailureSubmit(); // polls submit_request completion; called from Update
+    void DrawVotePopup();
+    void ProcessVoteSubmit(); // polls submit_request completion; called from Update
 
     bool can_report_failures = false;
     std::unique_ptr<AsyncRestClient> permission_request;
 
-    bool show_failure_popup = false;
-    int64_t pending_failure_run_id = 0;
-    std::array<bool, 12> failure_role_checked{}; // parallel to kFailureReasonRoles
-    std::string failure_submit_error;            // non-empty renders as an inline error in the popup
+    enum class PostRunVoteKind : uint8_t { None, Failure, Mvp };
+
+    // Opens the popup for utc_start's run, unless a different run's ALREADY-COMMITTED vote is still
+    // awaiting its run_id (see OpenVote's own comment) - an uncommitted/ignored vote can never reach
+    // that state, since DrawVotePopup's auto-close does a full reset unless something was committed.
+    void OpenVote(PostRunVoteKind kind, uint32_t utc_start);
+    void ResetVoteState();
+    void CancelPendingVoteIfMatching(uint32_t utc_start);
+    void FireVoteSubmit();
+
+    bool show_vote_popup = false;
+    PostRunVoteKind pending_vote_kind = PostRunVoteKind::None;
+    uint32_t pending_vote_utc_start = 0; // 0 = no vote in flight; correlates ProcessSync's later
+                                          // run_id lookup back to this vote (see OpenVote/ProcessSync)
+    int64_t pending_vote_run_id = 0;
+    bool vote_run_id_known = false; // explicit bool - 0 is a plausible db id, can't use as sentinel
+    // True once "Submit Vote" is clicked, even before vote_run_id_known - FireVoteSubmit no-ops
+    // (just sets this) until the run_id is known, then ProcessSync calls it again to actually send.
+    // Locks the popup's controls (see DrawVotePopup) and, on a failed send, is reset back to false
+    // (see ProcessVoteSubmit) so the existing retry-after-failure UX keeps working.
+    bool vote_pending_submit = false;
+    std::array<bool, 12> vote_role_checked{}; // parallel to kVoteRoles; shared by both vote kinds
+    std::string vote_submit_error;            // non-empty renders as an inline error in the popup
     std::unique_ptr<AsyncRestClient> submit_request;
-    // GetTickCount64() when the auto-trigger (ProcessSync) opened the popup; 0 means no vote window
-    // is active. DrawFailurePopup auto-closes the popup kFailureVoteWindowMs after this, and disables
-    // voting entirely (Dismiss still works) if this is 0 - i.e. the popup was opened manually via the
-    // plugin list's "Visible" checkbox (GetVisiblePtr) rather than by a real failed-run trigger, so
-    // there's nothing legitimate to vote on.
-    uint64_t failure_popup_opened_tick = 0;
+    uint64_t vote_popup_opened_tick = 0; // 0 = no vote window active (manually-opened popup)
 
     // --- Plugin version check ---
     // Two complementary mechanisms, both driven by the same plugin_outdated flag: proactively,
@@ -266,7 +309,7 @@ private:
     // own X-Plugin-Version header, and a 426 response from any of them (see their respective
     // completion handlers) sets plugin_outdated too - a backstop for the case where this build was
     // current when the proactive check ran but a newer one has shipped since. Once true,
-    // plugin_outdated disables ProcessSync's publish attempt and the failure-report popup entirely
+    // plugin_outdated disables ProcessSync's publish attempt and the vote popup entirely
     // (not just a warning - see their respective gates) until the plugin is updated and restarted.
     void RequestLatestPluginVersion(); // fires version_check_request; called once from LoadSettings
     void ProcessVersionCheck();        // polls version_check_request completion; called from Update

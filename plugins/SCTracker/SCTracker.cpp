@@ -43,9 +43,11 @@ struct LogEntry {
     uint32_t utc_start = 0;
     uint32_t map_id = 0;
     std::string character_name;
-    // "wipe", "resign", "completed", or "unknown". Set at run end from party/wipe signals alone
-    // ("wipe" or "resign" or "unknown"); ProcessSync later upgrades "resign"/"unknown" to "completed"
-    // once the matched GWToolboxdll objective data confirms the run actually finished.
+    // "wipe", "resign", "completed", or "unknown". Set at run end (OnGameSrvTransfer) from local
+    // party/wipe/dhuum_completed signals; ProcessSync later upgrades "resign"/"unknown" to
+    // "completed" as a fallback, for the rare case dhuum_completed itself missed it (e.g. a player
+    // who joined after Dhuum was already dead), once the matched GWToolboxdll objective data
+    // confirms the run actually finished.
     std::string end_reason;
     std::vector<SCTracker::PartyMember> party_members;
 };
@@ -79,15 +81,18 @@ struct PublishPayload {
 };
 
 // Only the fields ProcessSync needs from a successful /upload-run response body - run_id (absent
-// when the upload was silently dropped, e.g. an outdated plugin build) drives whether/which run
-// the failure-report popup opens for. Needs external linkage, same reason as LogEntry.
+// when the upload was silently dropped, e.g. an outdated plugin build) is what a pending vote
+// (failure or MVP) is waiting to correlate against before it can actually submit - see
+// SCTracker::pending_vote_run_id. Needs external linkage, same reason as LogEntry.
 struct UploadRunResponseDto {
     std::optional<int64_t> run_id;
     bool created = false;
 };
 
-// Body for POST /report-run-failure. Needs external linkage, same reason as LogEntry.
-struct ReportFailurePayload {
+// Body for both POST /report-run-failure and POST /report-run-mvp - identical shape; the endpoint
+// path (see SCTracker::FireVoteSubmit) is what tells the backend which kind this is. Needs
+// external linkage, same reason as LogEntry.
+struct ReportVotePayload {
     int64_t run_id = 0;
     std::vector<std::string> roles;
 };
@@ -107,25 +112,32 @@ namespace {
     constexpr const char* kBaseUrl = "https://gwsctracker.com";
     constexpr const char* kUploadRunsPath = "upload-run";
     constexpr const char* kReportFailurePath = "report-run-failure";
+    constexpr const char* kReportMvpPath = "report-run-mvp";
     constexpr const char* kCanReportFailurePath = "can-report-run-failure";
     constexpr const char* kPluginVersionPath = "plugin-version";
     constexpr int kHttpStatusUpgradeRequired = 426;
 
-    // Static role vocabulary for the failure-report popup, mirroring the backend's RoleDerivation
-    // output exactly (T1-T3 from the plugin's own role_hint, the rest from server-side profession-combo
-    // derivation the plugin has no visibility into) - see SCTracker::failure_role_checked's comment.
-    // "Nobody" (no player at fault - e.g. a disconnect, lag spike, or bad luck) records a run_failure_reasons
-    // row with no run_participant attached - see FailureReportService.submit on the backend.
-    constexpr std::array<const char*, 12> kFailureReasonRoles = {
+    // Static role vocabulary shared by both vote kinds (see SCTracker::PostRunVoteKind) - blame a
+    // role for a failed run (Failure, multi-select checkboxes - several roles can share blame for
+    // the same wipe), or credit exactly one role for a successful run (Mvp, single-select radio
+    // buttons - see DrawVotePopup). Mirrors the backend's RoleDerivation output exactly (T1-T3 from
+    // the plugin's own role_hint, the rest from server-side profession-combo derivation the plugin
+    // has no visibility into) - see SCTracker::vote_role_checked's comment. For a failure vote,
+    // "Nobody" (no player at fault - e.g. a disconnect, lag spike, or bad luck) records a
+    // run_failure_reasons row with no run_participant attached - see FailureReportService.submit on
+    // the backend.
+    constexpr std::array<const char*, 12> kVoteRoles = {
         "T1", "T2", "T3", "T4", "LT", "Spiker", "Derv", "SoS", "Necro", "RangerNecro", "Emo", "Nobody",
     };
-    // "Nobody" must stay last in kFailureReasonRoles - DrawFailurePopup uses this index to enforce
-    // mutual exclusivity between it and every other reason (checking one clears the other(s)).
-    constexpr size_t kNobodyReasonIndex = kFailureReasonRoles.size() - 1;
+    // "Nobody" must stay last in kVoteRoles - DrawVotePopup uses this index to enforce mutual
+    // exclusivity between it and every other reason for a Failure vote (checking one clears the
+    // other(s)); an Mvp vote is single-select across all roles already, so exclusivity there is
+    // automatic and doesn't need this index at all.
+    constexpr size_t kNobodyVoteRoleIndex = kVoteRoles.size() - 1;
     constexpr uint64_t kSyncScanIntervalMs = 5 * 60 * 1000;      // rescan local files for new entries
     constexpr uint64_t kObjectiveGiveUpTimeoutMs = 10 * 60 * 1000; // publish without a matched objective past this
     constexpr uint64_t kRetryBackoffMs = 60 * 1000;               // wait this long before retrying a failed publish
-    constexpr uint64_t kFailureVoteWindowMs = 60 * 1000; // how long the failure-report popup stays open
+    constexpr uint64_t kVoteWindowMs = 60 * 1000; // how long the post-run vote popup stays open
     constexpr uint32_t kDeathTrackingGraceSec = 60; // ignore deaths in the first minute of the instance
 
     // Marks Dhuum's agent turning hostile (GAME_SMSG_AGENT_UPDATE_ALLEGIANCE). Same signal
@@ -147,6 +159,93 @@ namespace {
     const std::unordered_set<uint32_t> kTrackedMapIds = {
         static_cast<uint32_t>(GW::Constants::MapID::The_Underworld),
     };
+
+    // Encoded item-identity token for "Ghastly Summoning Stone" (GW::Constants::ItemID::GhastlyStone,
+    // model_id 32557) - GW's fixed per-template control-code sequence for this item, matching
+    // regardless of client display language, same technique as kResignedPrefix (below) and
+    // GWToolboxdll/Modules/ChatFilter.cpp's rare_item_names/encoded_ashes_names. Confirmed via live
+    // capture (2026-08-26) to be invariant across every message template this feature cares about -
+    // drop and pickup, singular and plural alike (0x7F0/0x7F2/0x7F6/0x7FC) - so it's matched as a raw
+    // substring anywhere in the message (see MessageContainsGhastlySummoningStone) rather than at a
+    // fixed segment position: that position itself shifts when the quantity parameter below is
+    // present, which is what a first attempt at fixed-position matching got wrong.
+    constexpr wchar_t kGhastlySummoningStoneItemToken[] = L"\x8102\x5cc3";
+
+    // Mirrors GWToolboxdll/Modules/ChatFilter.cpp's identically-named helpers (verbatim logic) -
+    // reimplemented here since plugins can't include GWToolboxdll-internal headers. Used to parse the
+    // "<player> drops/picks up <item>"-family chat messages for gambling-stone attribution (both drop
+    // and pickup - see OnWriteToChatLog).
+    size_t GetSegmentLength(const wchar_t* encoded_segment)
+    {
+        if (!(encoded_segment && *encoded_segment > 0x100)) {
+            return 0;
+        }
+        size_t length = 0;
+        do {
+            length++;
+        } while (*encoded_segment++ & 0x8000);
+        return length;
+    }
+
+    const wchar_t* GetSegment(const wchar_t* encoded_string, const wchar_t identifier, size_t* segment_length = nullptr)
+    {
+        if (!encoded_string) {
+            return nullptr;
+        }
+        const auto found = wcschr(encoded_string, identifier);
+        if (!found) {
+            return nullptr;
+        }
+        const wchar_t* segment = found + 1;
+        if (segment_length) {
+            *segment_length = GetSegmentLength(segment);
+        }
+        return segment;
+    }
+
+    const wchar_t* GetFirstSegment(const wchar_t* encoded_string, size_t* segment_length = nullptr)
+    {
+        return GetSegment(encoded_string, 0x10a, segment_length);
+    }
+
+    bool IsPlayerNameToken(const wchar_t* encoded_string)
+    {
+        return encoded_string && wcsncmp(encoded_string, L"\xba9\x107", 2) == 0;
+    }
+
+    // True if kGhastlySummoningStoneItemToken appears anywhere in the message - see that constant's
+    // own comment for why this is a raw substring scan rather than a fixed-position segment match.
+    bool MessageContainsGhastlySummoningStone(const wchar_t* message)
+    {
+        if (!message) {
+            return false;
+        }
+        constexpr size_t token_len = std::size(kGhastlySummoningStoneItemToken) - 1;
+        for (const wchar_t* p = message; *p != 0; ++p) {
+            if (wcsncmp(p, kGhastlySummoningStoneItemToken, token_len) == 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Reads a drop/pickup message's own quantity directly out of its embedded 0x101-tagged numeric
+    // parameter - the same small-integer encoding GWToolboxdll/Modules/ChatFilter.cpp's
+    // GetNumericSegment uses elsewhere (value = codepoint - 0x100). Confirmed via live capture
+    // (2026-08-26): this parameter is entirely absent for a quantity-1 event and present as 0x100+N
+    // for N>1 (e.g. 0x103 decodes to 3 for a 3-stack drop) - defaults to 1 to match that observed
+    // singular-omission behavior. Reading this directly from each event's own message is what lets
+    // drop and pickup both get an exact quantity without needing to correlate against a separate
+    // ItemGeneral sighting (a stone dropped and later picked up minutes apart, possibly by a different
+    // party member, has no other shared key to correlate the two events by anyway).
+    uint32_t GetGamblingStoneQuantity(const wchar_t* message)
+    {
+        const wchar_t* found = GetSegment(message, 0x101);
+        if (!found || *found < 0x100) {
+            return 1;
+        }
+        return static_cast<uint32_t>(*found) - 0x100;
+    }
 
     std::filesystem::path GetRunsFolder()
     {
@@ -496,26 +595,118 @@ void SCTracker::OnPartyDefeated()
 
 void SCTracker::OnWriteToChatLog(const wchar_t* message)
 {
-    if (!run_active || !message || wmemcmp(message, kResignedPrefix, 5) != 0) {
+    if (!run_active || !message) {
         return;
     }
-    const std::wstring resigned_name = PluginUtils::GetPlayerNameFromEncodedString(message);
-    if (resigned_name.empty()) {
-        return;
-    }
-    const GW::PartyInfo* info = GW::PartyMgr::GetPartyInfo();
-    if (!info) {
-        return;
-    }
-    for (const auto& player : info->players) {
-        const wchar_t* name_ptr = GW::PlayerMgr::GetPlayerName(player.login_number);
-        if (!name_ptr) {
-            continue;
-        }
-        if (PluginUtils::SanitizePlayerName(name_ptr) == resigned_name) {
-            resigned_login_numbers.insert(player.login_number);
+    if (wmemcmp(message, kResignedPrefix, 5) == 0) {
+        const std::wstring resigned_name = PluginUtils::GetPlayerNameFromEncodedString(message);
+        if (resigned_name.empty()) {
             return;
         }
+        const GW::PartyInfo* info = GW::PartyMgr::GetPartyInfo();
+        if (!info) {
+            return;
+        }
+        for (const auto& player : info->players) {
+            const wchar_t* name_ptr = GW::PlayerMgr::GetPlayerName(player.login_number);
+            if (!name_ptr) {
+                continue;
+            }
+            if (PluginUtils::SanitizePlayerName(name_ptr) == resigned_name) {
+                resigned_login_numbers.insert(player.login_number);
+                return;
+            }
+        }
+        return;
+    }
+
+    // Post-Dhuum gambling ritual (see PartyMember::gambling_stone_net). Gated on dhuum_completed as a
+    // cheap belt-and-suspenders check alongside the exact item-name token match below.
+    if (!dhuum_completed) {
+        return;
+    }
+    switch (message[0]) {
+        case 0x7F0: { // monster/player X drops item Y - ChatFilter.cpp's same case
+            if (!IsPlayerNameToken(GetFirstSegment(message))) {
+                return; // monster drop, not a party member's manual drop
+            }
+            if (!MessageContainsGhastlySummoningStone(message)) {
+                return;
+            }
+            const std::wstring dropper_name = PluginUtils::GetPlayerNameFromEncodedString(message);
+            if (dropper_name.empty()) {
+                return;
+            }
+            const GW::PartyInfo* info = GW::PartyMgr::GetPartyInfo();
+            if (!info) {
+                return;
+            }
+            const uint32_t quantity = GetGamblingStoneQuantity(message);
+            for (const auto& player : info->players) {
+                const wchar_t* name_ptr = GW::PlayerMgr::GetPlayerName(player.login_number);
+                if (!name_ptr || PluginUtils::SanitizePlayerName(name_ptr) != dropper_name) {
+                    continue;
+                }
+                const GW::Player* gwplayer = GW::PlayerMgr::GetPlayerByID(player.login_number);
+                const auto member_it = gwplayer ? agent_id_to_party_index.find(gwplayer->agent_id)
+                                                 : agent_id_to_party_index.end();
+                if (member_it != agent_id_to_party_index.end()) {
+                    AddGamblingStoneDelta(member_it->second, -static_cast<int32_t>(quantity));
+                }
+                return;
+            }
+            break;
+        }
+        case 0x7F2: { // you (local player) drop item Y
+            if (!MessageContainsGhastlySummoningStone(message)) {
+                return;
+            }
+            const auto member_it = agent_id_to_party_index.find(GW::Agents::GetControlledCharacterId());
+            if (member_it != agent_id_to_party_index.end()) {
+                AddGamblingStoneDelta(member_it->second, -static_cast<int32_t>(GetGamblingStoneQuantity(message)));
+            }
+            break;
+        }
+        case 0x7F6: { // player x picks up item y (note: item can be unassigned gold)
+            if (!MessageContainsGhastlySummoningStone(message)) {
+                return;
+            }
+            const std::wstring picker_name = PluginUtils::GetPlayerNameFromEncodedString(message);
+            if (picker_name.empty()) {
+                return;
+            }
+            const GW::PartyInfo* info = GW::PartyMgr::GetPartyInfo();
+            if (!info) {
+                return;
+            }
+            const uint32_t quantity = GetGamblingStoneQuantity(message);
+            for (const auto& player : info->players) {
+                const wchar_t* name_ptr = GW::PlayerMgr::GetPlayerName(player.login_number);
+                if (!name_ptr || PluginUtils::SanitizePlayerName(name_ptr) != picker_name) {
+                    continue;
+                }
+                const GW::Player* gwplayer = GW::PlayerMgr::GetPlayerByID(player.login_number);
+                const auto member_it = gwplayer ? agent_id_to_party_index.find(gwplayer->agent_id)
+                                                 : agent_id_to_party_index.end();
+                if (member_it != agent_id_to_party_index.end()) {
+                    AddGamblingStoneDelta(member_it->second, static_cast<int32_t>(quantity));
+                }
+                return;
+            }
+            break;
+        }
+        case 0x7FC: { // you pick up item y (note: item can be unassigned gold)
+            if (!MessageContainsGhastlySummoningStone(message)) {
+                return;
+            }
+            const auto member_it = agent_id_to_party_index.find(GW::Agents::GetControlledCharacterId());
+            if (member_it != agent_id_to_party_index.end()) {
+                AddGamblingStoneDelta(member_it->second, static_cast<int32_t>(GetGamblingStoneQuantity(message)));
+            }
+            break;
+        }
+        default:
+            break;
     }
 }
 
@@ -669,10 +860,16 @@ void SCTracker::ProcessTrackedSkillUse(const std::string& skill_name)
 }
 
 // GAME_SMSG_ITEM_GENERAL_INFO - fires for items as they're identified client-side (e.g. a drop
-// landing). Caches item_id -> model_id only for kTrackedItems hits, so OnItemUpdateOwner has
-// something to resolve the item_id it gets to. Untracked items are never cached, keeping this bounded
-// to however many tracked-item drops are in flight at once. Glob of Ectoplasm specifically stops being
-// cached (and therefore counted) once dhuum_completed is set - other tracked items are unaffected.
+// landing). Caches item_id -> model_id for kTrackedItems hits (so OnItemUpdateOwner has something to
+// resolve the item_id it gets to) - untracked items are never cached, keeping this bounded to however
+// many tracked-item drops are in flight at once. Glob of Ectoplasm specifically stops being cached
+// (and therefore counted) once dhuum_completed is set - other tracked items are unaffected. The
+// gambling stone (PartyMember::gambling_stone_net) is deliberately NOT handled here or via
+// OnItemUpdateOwner below - both drop and pickup are attributed entirely from their own chat message
+// in OnWriteToChatLog instead (item identity and exact quantity are both readable directly from that
+// message - see MessageContainsGhastlySummoningStone/GetGamblingStoneQuantity), since ItemUpdateOwner
+// was confirmed via live testing (2026-08-26) to not fire at all for a self-pickup of a self-dropped
+// item, and using both paths together would risk double-counting for any case where it does fire.
 void SCTracker::OnItemGeneral(const uint32_t item_id, const uint32_t model_id)
 {
     if (!run_active || !kTrackedItems.contains(model_id)) {
@@ -685,11 +882,12 @@ void SCTracker::OnItemGeneral(const uint32_t item_id, const uint32_t model_id)
 }
 
 // GAME_SMSG_ITEM_UPDATE_OWNER - loot reservation, broadcast to the whole party (not just the
-// recipient). Can re-fire for the same item_id if the reservation is reassigned (GWToolboxdll's
-// ItemDrops module tracks this by updating an owner map in place, not counting) - only the first
-// firing for a given tracked item_id is counted here, then the cache entry is erased so a later
-// reassignment isn't double-counted. Reflects who it was reserved for, not confirmed pickup - another
-// player's inventory contents beyond a reservation broadcast aren't visible to this client at all.
+// recipient); also fires for a manually-dropped item's pickup, not just kill loot. Can re-fire for
+// the same item_id if the reservation is reassigned (GWToolboxdll's ItemDrops module tracks this by
+// updating an owner map in place, not counting) - only the first firing for a given tracked item_id
+// is counted here, then the cache entry is erased so a later reassignment isn't double-counted.
+// Reflects who it was reserved for, not confirmed pickup - another player's inventory contents beyond
+// a reservation broadcast aren't visible to this client at all.
 void SCTracker::OnItemUpdateOwner(const uint32_t item_id, const uint32_t owner_agent_id)
 {
     if (!run_active) {
@@ -706,6 +904,7 @@ void SCTracker::OnItemUpdateOwner(const uint32_t item_id, const uint32_t owner_a
     if (member_it == agent_id_to_party_index.end()) {
         return;
     }
+
     auto& drops = party_members[member_it->second].item_drops;
     const auto drop_it = std::ranges::find(drops, model_id, &PartyMember::ItemDropCount::id);
     if (drop_it != drops.end()) {
@@ -714,6 +913,22 @@ void SCTracker::OnItemUpdateOwner(const uint32_t item_id, const uint32_t owner_a
     else {
         drops.push_back({.id = model_id, .count = 1});
     }
+}
+
+// Single choke point for both the drop (OnWriteToChatLog, negative delta) and pickup
+// (OnItemUpdateOwner, positive delta) paths - initializes gambling_stone_net from null to 0 on a
+// member's first gambling event of the run (see the field's own comment for the null/0 distinction),
+// then applies delta (already sign-adjusted and quantity-weighted by the caller - see
+// OnWriteToChatLog, the sole caller for both drop and pickup). Guards on is_player here rather than at
+// each call site - heroes/henchmen are reachable via agent_id_to_party_index (it indexes every party
+// member) but can never actually perform the ritual.
+void SCTracker::AddGamblingStoneDelta(const size_t party_index, const int32_t delta)
+{
+    PartyMember& member = party_members[party_index];
+    if (!member.is_player) {
+        return;
+    }
+    member.gambling_stone_net = member.gambling_stone_net.value_or(0) + delta;
 }
 
 void SCTracker::OnGameSrvTransfer()
@@ -751,8 +966,31 @@ void SCTracker::OnGameSrvTransfer()
     if (end_reason == "unknown" && wipe_detected) {
         end_reason = "wipe";
     }
+    // dhuum_completed is latched in real time off the native GAME_SMSG_MISSION_OBJECTIVE_COMPLETE
+    // packet (see OnObjectiveDone) - the same signal GWToolboxdll uses to mark its own Dhuum
+    // objective Completed, just observed here locally and immediately instead of from its
+    // ObjectiveTimerRuns_*.json file, which isn't flushed to disk until the next map load. This
+    // means "completed" is usually already known right now rather than only after ProcessSync's
+    // later IsRunCompleted fallback (still needed for the rare case a player joined after Dhuum was
+    // already dead and so never saw the packet themselves). Never overrides "wipe" - a genuine
+    // death event stays notable even in the rare case it's right after a kill.
+    if (end_reason != "wipe" && dhuum_completed) {
+        end_reason = "completed";
+    }
     WriteLogEntry(pending_utc_start, pending_map_id, pending_character_name, end_reason, party_members);
     last_queue_scan_tick = 0; // force ProcessSync to pick this up on the next tick, not the 5-minute cadence
+
+    // Open the post-run vote immediately using this locally-known outcome, rather than waiting for
+    // ProcessSync to publish (which needs GWToolboxdll's own delayed objective file) - see OpenVote.
+    if (can_report_failures && !plugin_outdated) {
+        if (end_reason == "wipe" || end_reason == "resign") {
+            OpenVote(PostRunVoteKind::Failure, pending_utc_start);
+        }
+        else if (end_reason == "completed") {
+            OpenVote(PostRunVoteKind::Mvp, pending_utc_start);
+        }
+        // "unknown" opens nothing.
+    }
 }
 
 void SCTracker::Update(float)
@@ -761,7 +999,7 @@ void SCTracker::Update(float)
     FlushPendingRoleSkills();
     ProcessSync();
     ProcessPermissionCheck();
-    ProcessFailureSubmit();
+    ProcessVoteSubmit();
     ProcessVersionCheck();
     ProcessPendingOutdatedNotice();
 }
@@ -911,12 +1149,12 @@ void SCTracker::WriteLogEntry(const uint32_t utc_start, const uint32_t map_id, c
     }
 }
 
-void SCTracker::RefreshSyncQueue()
+std::optional<SCTracker::PendingSyncEntry> SCTracker::FindNextPendingEntry()
 {
-    std::unordered_set<uint32_t> already_queued;
-    for (const auto& q : sync_queue) {
-        already_queued.insert(q.utc_start);
-    }
+    // Only the single oldest not-yet-published entry is ever tracked (see pending_sync's
+    // declaration), so there's nothing to dedupe against in memory - last_persisted_utc_start alone
+    // determines what's still outstanding.
+    std::optional<PendingSyncEntry> best;
 
     const uint32_t now_utc = static_cast<uint32_t>(time(nullptr));
     for (const uint32_t candidate_ts : {now_utc, now_utc - 86400u}) {
@@ -925,21 +1163,20 @@ void SCTracker::RefreshSyncQueue()
             continue;
         }
         for (auto& e : entries) {
-            if (e.utc_start > last_persisted_utc_start && !already_queued.contains(e.utc_start)) {
-                sync_queue.push_back(SyncQueueEntry{
+            if (e.utc_start > last_persisted_utc_start && (!best || e.utc_start < best->utc_start)) {
+                best = PendingSyncEntry{
                     .utc_start = e.utc_start,
                     .map_id = e.map_id,
                     .character_name = std::move(e.character_name),
                     .end_reason = std::move(e.end_reason),
                     .party_members = std::move(e.party_members),
                     .first_seen_tick = GetTickCount64(),
-                });
-                already_queued.insert(e.utc_start);
+                };
             }
         }
     }
 
-    std::ranges::sort(sync_queue, {}, &SyncQueueEntry::utc_start);
+    return best;
 }
 
 void SCTracker::ProcessSync()
@@ -962,23 +1199,31 @@ void SCTracker::ProcessSync()
             if (!settings_folder.empty()) {
                 SaveSettings(settings_folder.c_str()); // persist the watermark now, not on the host's cadence
             }
-            if (!sync_queue.empty() && sync_queue.front().utc_start == publishing_utc_start) {
-                // Open the failure-report popup for this run before popping it - need its
-                // end_reason, which only lives on the queue entry, not the response body. Gated on
-                // can_report_failures so none of this (including parsing the response body below)
-                // runs at all when the server hasn't confirmed permission - see its declaration.
-                const bool failed = can_report_failures &&
-                    (sync_queue.front().end_reason == "wipe" || sync_queue.front().end_reason == "resign");
-                UploadRunResponseDto response;
-                constexpr glz::opts opts{.error_on_unknown_keys = false};
-                if (failed && !glz::read<opts>(response, publish_request->GetContent()) && response.run_id) {
-                    pending_failure_run_id = *response.run_id;
-                    show_failure_popup = true;
-                    failure_role_checked.fill(false);
-                    failure_submit_error.clear();
-                    failure_popup_opened_tick = GetTickCount64();
+            if (pending_sync && pending_sync->utc_start == publishing_utc_start) {
+                // Correlate the server-assigned run_id if a vote is pending for this exact run
+                // (opened at run-end in OnGameSrvTransfer) - the vote itself was already opened
+                // with the right kind/content back then, this just unblocks its eventual submit.
+                if (pending_vote_utc_start != 0 && pending_vote_utc_start == pending_sync->utc_start && !vote_run_id_known) {
+                    UploadRunResponseDto response;
+                    constexpr glz::opts opts{.error_on_unknown_keys = false};
+                    if (!glz::read<opts>(response, publish_request->GetContent()) && response.run_id) {
+                        pending_vote_run_id = *response.run_id;
+                        vote_run_id_known = true;
+                        if (vote_pending_submit) {
+                            FireVoteSubmit(); // already clicked Submit before run_id was known - send now
+                        }
+                    }
+                    else {
+                        // No run_id ever coming for this run (parse failure, or the upload was
+                        // silently dropped - see UploadRunResponseDto's comment). Nothing will ever
+                        // resolve this vote; reset now rather than leave it stuck blocking every
+                        // future vote via OpenVote's guard.
+                        AppendLog(std::format("Vote for run {} can never resolve: publish succeeded with no run_id",
+                                               pending_sync->utc_start));
+                        ResetVoteState();
+                    }
                 }
-                sync_queue.pop_front();
+                pending_sync = FindNextPendingEntry();
             }
         }
         else {
@@ -1004,30 +1249,37 @@ void SCTracker::ProcessSync()
         return;
     }
 
-    if (now - last_queue_scan_tick >= kSyncScanIntervalMs) {
+    // Only rescans for a new entry when none is currently held: processing is always strictly
+    // oldest-first by utc_start, and a scalar already holds the minimum unresolved entry, so
+    // rescanning while one is already pending can't change what gets processed next.
+    if (!pending_sync && now - last_queue_scan_tick >= kSyncScanIntervalMs) {
         last_queue_scan_tick = now;
-        RefreshSyncQueue();
+        pending_sync = FindNextPendingEntry();
     }
-    if (sync_queue.empty()) {
+    if (!pending_sync) {
         return;
     }
 
-    // Drain every disqualified entry up front, regardless of queue position, so a stuck head-of-queue
-    // entry (e.g. one that will never find a matching objective) doesn't block entries behind it from
-    // ever being evaluated - the loop only stops at an entry that's either ready to publish or still
-    // within its give-up window. Only full 8-man parties of real players are meaningful for the
-    // leaderboard backend (a solo player filling the other 7 slots with heroes/henchmen still occupies
-    // all 8 slots but isn't a guild run), and a run with no matching GWToolboxdll objective entry can
-    // never be leaderboard-eligible anyway. Both cases mark the entry synced instead of retrying it
-    // forever.
+    // Drain every disqualified entry up front, so a stuck entry (e.g. one that will never find a
+    // matching objective) doesn't block whatever comes after it from ever being evaluated - the loop
+    // only stops at an entry that's either ready to publish or still within its give-up window.
+    // Resolving a disqualified entry immediately searches for the next oldest one via
+    // FindNextPendingEntry(), so several already-known-disqualified runs still drain within one
+    // ProcessSync() tick instead of one per scan interval. Only full 8-man parties of real players
+    // are meaningful for the leaderboard backend (a solo player filling the other 7 slots with
+    // heroes/henchmen still occupies all 8 slots but isn't a guild run), and a run with no matching
+    // GWToolboxdll objective entry can never be leaderboard-eligible anyway. Both cases mark the
+    // entry synced instead of retrying it forever.
     bool advanced_watermark = false;
     RemoteObjectiveSet objective_set;
     bool have_objective = false;
-    while (!sync_queue.empty()) {
-        auto& front = sync_queue.front();
+    while (pending_sync) {
+        auto& front = *pending_sync;
         if (CountRealPlayers(front.party_members) != 8) {
             last_persisted_utc_start = front.utc_start;
-            sync_queue.pop_front();
+            CancelPendingVoteIfMatching(front.utc_start); // before front is invalidated below
+            last_queue_scan_tick = now;
+            pending_sync = FindNextPendingEntry();
             advanced_watermark = true;
             continue;
         }
@@ -1043,25 +1295,37 @@ void SCTracker::ProcessSync()
         AppendLog(std::format("Dropping run {} (map {}): no matching objective entry after give-up timeout",
                                front.utc_start, front.map_id));
         last_persisted_utc_start = front.utc_start;
-        sync_queue.pop_front();
+        CancelPendingVoteIfMatching(front.utc_start); // before front is invalidated below
+        last_queue_scan_tick = now;
+        pending_sync = FindNextPendingEntry();
         advanced_watermark = true;
     }
     if (advanced_watermark && !settings_folder.empty()) {
         SaveSettings(settings_folder.c_str()); // persist the advanced watermark now, not on the host's cadence
     }
-    if (sync_queue.empty() || !have_objective) {
+    if (!pending_sync || !have_objective) {
         return;
     }
 
-    auto& next = sync_queue.front();
+    auto& next = *pending_sync;
 
     // Now that we have the objective data, correct a resign/unknown classification if the run actually
     // finished (e.g. resigning right after killing Dhuum shouldn't read as giving up). Leave "wipe" as
     // reported - a genuine death event stays notable even in the rare case it's right after a kill.
-    // Also corrects the local PartyLog_*.json entry, not just the published payload.
+    // Also corrects the local PartyLog_*.json entry, not just the published payload. This is now a
+    // rare fallback for the case OnGameSrvTransfer's own dhuum_completed check missed (e.g. a player
+    // who joined after Dhuum was already dead) - the common case is already classified "completed" at
+    // run end.
     if (next.end_reason != "wipe" && next.end_reason != "completed" && IsRunCompleted(objective_set)) {
+        CancelPendingVoteIfMatching(next.utc_start); // unconditional - discard a stale Failure vote;
+                                                      // it may have been opened under different
+                                                      // permission/outdated state than now, so cancel
+                                                      // regardless of that
         next.end_reason = "completed";
         WriteLogEntry(next.utc_start, next.map_id, next.character_name, next.end_reason, next.party_members);
+        if (can_report_failures && !plugin_outdated) {
+            OpenVote(PostRunVoteKind::Mvp, next.utc_start); // late but real - better late than never
+        }
     }
 
     PublishPayload payload{
@@ -1094,8 +1358,8 @@ void SCTracker::ProcessSync()
 }
 
 // Fired once from LoadSettings, right after machine_key loads. can_report_failures defaults false
-// and stays false (the safe default - failure-report logic never runs) unless/until this completes
-// successfully with a true response.
+// and stays false (the safe default - none of the post-run voting logic runs) unless/until this
+// completes successfully with a true response.
 void SCTracker::RequestReportPermission()
 {
     can_report_failures = false;
@@ -1141,18 +1405,99 @@ void SCTracker::ProcessPermissionCheck()
     permission_request.reset();
 }
 
+// Opens the vote popup for utc_start's run. Only blocks on a vote the user already committed to
+// (clicked Submit) that's still awaiting its run_id - an ignored/uncommitted vote's
+// pending_vote_utc_start can never reach here nonzero for a DIFFERENT run, since DrawVotePopup's
+// auto-close fully resets uncommitted votes (see its comment) rather than leaving stale state that
+// would block every future vote forever.
+void SCTracker::OpenVote(const PostRunVoteKind kind, const uint32_t utc_start)
+{
+    if (vote_pending_submit && !vote_run_id_known && pending_vote_utc_start != 0 && pending_vote_utc_start != utc_start) {
+        AppendLog(std::format("Skipped opening a vote for run {}: a committed vote for run {} is still awaiting its run_id",
+                               utc_start, pending_vote_utc_start));
+        return;
+    }
+    pending_vote_kind = kind;
+    pending_vote_utc_start = utc_start;
+    pending_vote_run_id = 0;
+    vote_run_id_known = false;
+    vote_pending_submit = false;
+    show_vote_popup = true;
+    vote_role_checked.fill(false);
+    vote_submit_error.clear();
+    vote_popup_opened_tick = GetTickCount64();
+}
+
+void SCTracker::ResetVoteState()
+{
+    show_vote_popup = false;
+    pending_vote_kind = PostRunVoteKind::None;
+    pending_vote_utc_start = 0;
+    pending_vote_run_id = 0;
+    vote_run_id_known = false;
+    vote_pending_submit = false;
+    vote_role_checked.fill(false);
+    vote_submit_error.clear();
+    vote_popup_opened_tick = 0;
+}
+
+// No-op unless a vote is actually pending for utc_start - this run either turned out not to be a
+// real failure (resign-that-actually-completed correction), or will never get a run_id (non-8-man
+// skip / give-up-timeout drop).
+void SCTracker::CancelPendingVoteIfMatching(const uint32_t utc_start)
+{
+    if (pending_vote_utc_start == utc_start && pending_vote_utc_start != 0) {
+        ResetVoteState();
+    }
+}
+
+// Builds and fires submit_request from pending_vote_run_id/vote_role_checked - shared by
+// DrawVotePopup's Submit button (fired immediately when vote_run_id_known) and ProcessSync's
+// publish-success handler (fired once the run_id arrives, if vote_pending_submit was already set).
+// Called before vote_run_id_known too (from the Submit button): in that case it just records the
+// commitment and returns, and ProcessSync calls it again once the run_id resolves to actually send.
+void SCTracker::FireVoteSubmit()
+{
+    vote_pending_submit = true; // idempotent
+    if (!vote_run_id_known) {
+        return; // ProcessSync will call this again once the run_id resolves
+    }
+    ReportVotePayload payload{.run_id = pending_vote_run_id};
+    for (size_t i = 0; i < kVoteRoles.size(); i++) {
+        if (vote_role_checked[i]) {
+            payload.roles.emplace_back(kVoteRoles[i]);
+        }
+    }
+
+    std::string url;
+    ComposeUrl(url, kBaseUrl, pending_vote_kind == PostRunVoteKind::Mvp ? kReportMvpPath : kReportFailurePath);
+
+    submit_request = std::make_unique<AsyncRestClient>();
+    submit_request->SetUrl(url.c_str());
+    submit_request->SetMethod(HttpMethod::Post);
+    submit_request->SetHeader("Content-Type", "application/json");
+    submit_request->SetHeader("X-Machine-Key", machine_key.c_str());
+    submit_request->SetHeader("X-Plugin-Version", std::to_string(kPluginVersion).c_str());
+    submit_request->SetPostContent(glz::write_json(payload).value_or(std::string{}), ContentFlag::Copy);
+    submit_request->SetTimeoutSec(10);
+    submit_request->SetConnectTimeoutSec(5);
+    submit_request->SetVerifyPeer(true);
+    submit_request->SetVerifyHost(true);
+    vote_submit_error.clear();
+    submit_request->ExecuteAsync();
+}
+
 // Polls submit_request completion (called from Update, same as ProcessSync polls publish_request).
-// On success the popup closes; on failure the truncated response body is kept on screen so the user
-// can see why and adjust their selection before retrying.
-void SCTracker::ProcessFailureSubmit()
+// On success the popup closes; on failure the truncated response body is kept on screen and
+// vote_pending_submit is cleared so the user can see why and retry (re-clicking Submit) before the
+// vote window closes.
+void SCTracker::ProcessVoteSubmit()
 {
     if (!submit_request || !submit_request->IsCompleted()) {
         return;
     }
     if (submit_request->IsSuccessful()) {
-        show_failure_popup = false;
-        failure_popup_opened_tick = 0;
-        failure_submit_error.clear();
+        ResetVoteState();
     }
     else {
         if (submit_request->GetStatusCode() == kHttpStatusUpgradeRequired) {
@@ -1165,9 +1510,10 @@ void SCTracker::ProcessFailureSubmit()
         if (body.size() > 200) {
             body.resize(200);
         }
-        failure_submit_error = std::format("Submit failed: status={} http_code={} body={}",
-                                            submit_request->GetStatusStr(), submit_request->GetStatusCode(), body);
-        AppendLog(std::format("Failure report failed for run {}: {}", pending_failure_run_id, failure_submit_error));
+        vote_pending_submit = false; // unlock the popup's controls so the user can retry
+        vote_submit_error = std::format("Submit failed: status={} http_code={} body={}",
+                                         submit_request->GetStatusStr(), submit_request->GetStatusCode(), body);
+        AppendLog(std::format("Vote submit failed for run_id {}: {}", pending_vote_run_id, vote_submit_error));
     }
     submit_request.reset();
 }
@@ -1231,108 +1577,114 @@ void SCTracker::ProcessPendingOutdatedNotice()
     // the GWCA-reserved channels instead (same as GWToolboxdll's own plugin-detected notice in
     // PluginModule.cpp) so this shows up as normal, scrollable chat text.
     GW::Chat::WriteChat(GW::Chat::Channel::CHANNEL_GWCA2,
-                         L"<c=#FF0000>SCTracker is out of date - syncing and failure reporting are disabled "
+                         L"<c=#FF0000>SCTracker is out of date - syncing and vote reporting are disabled "
                          "until you redownload from gwsctracker.com/account.</c>",
                          L"SCTracker", false);
 }
 
-void SCTracker::DrawFailurePopup()
+void SCTracker::DrawVotePopup()
 {
-    // can_report_failures/plugin_outdated are re-checked here too (not just at the ProcessSync call
-    // site that sets show_failure_popup) in case either changed server-side while the popup sat open.
-    if (!show_failure_popup || !can_report_failures || plugin_outdated) {
+    // can_report_failures/plugin_outdated are re-checked here too (not just at the trigger sites
+    // that set show_vote_popup) in case either changed server-side while the popup sat open.
+    if (!show_vote_popup || !can_report_failures || plugin_outdated) {
         return;
     }
 
-    // Auto-close kFailureVoteWindowMs after the auto-trigger opened it - a vote submitted long after
-    // the run in question is no longer useful. Only applies when the timer is actually running
-    // (failure_popup_opened_tick != 0); a manually-opened popup (see its member comment) has no
-    // timer to expire and stays open until Dismissed.
+    // Auto-close kVoteWindowMs after a real trigger opened it - a vote submitted long after the run
+    // in question is no longer useful. Only applies when the timer is actually running
+    // (vote_popup_opened_tick != 0); a manually-opened popup (see its member comment) has no timer
+    // to expire and stays open until Dismissed.
     const uint64_t now = GetTickCount64();
-    const bool timer_active = failure_popup_opened_tick != 0 && (now - failure_popup_opened_tick) < kFailureVoteWindowMs;
-    if (failure_popup_opened_tick != 0 && !timer_active) {
-        show_failure_popup = false;
-        failure_popup_opened_tick = 0;
+    const bool timer_active = vote_popup_opened_tick != 0 && (now - vote_popup_opened_tick) < kVoteWindowMs;
+    if (vote_popup_opened_tick != 0 && !timer_active) {
+        if (vote_pending_submit) {
+            // Committed before the window closed - preserve everything else so ProcessSync can
+            // still correlate the run_id and FireVoteSubmit can still send it later.
+            show_vote_popup = false;
+            vote_popup_opened_tick = 0;
+        }
+        else {
+            ResetVoteState(); // nothing committed - nothing worth preserving
+        }
         return;
     }
 
+    const bool is_mvp = pending_vote_kind == PostRunVoteKind::Mvp;
     ImGui::SetNextWindowSize(ImVec2(420.0f, 480.0f), ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("SCTracker: Run Failure", &show_failure_popup)) {
-        ImGui::TextWrapped("The most recent run ended in a wipe or resign. Vote for which role(s) you believe "
-                            "were at fault - votes from everyone in the party who reports get combined "
-                            "server-side to determine the actual cause.");
+    if (ImGui::Begin(is_mvp ? "SCTracker: MVP Vote" : "SCTracker: Run Failure", &show_vote_popup)) {
+        if (is_mvp) {
+            ImGui::TextWrapped("The most recent run completed. Vote for which role you believe performed best - "
+                                "votes from everyone in the party who reports get combined server-side.");
+        }
+        else {
+            ImGui::TextWrapped("The most recent run ended in a wipe or resign. Vote for which role(s) you believe "
+                                "were at fault - votes from everyone in the party who reports get combined "
+                                "server-side to determine the actual cause.");
+        }
         if (timer_active) {
-            const uint64_t remaining_sec = (kFailureVoteWindowMs - (now - failure_popup_opened_tick)) / 1000;
+            const uint64_t remaining_sec = (kVoteWindowMs - (now - vote_popup_opened_tick)) / 1000;
             ImGui::Text("Voting closes in %llus", static_cast<unsigned long long>(remaining_sec));
         }
         else {
             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
                                 "No active vote - this popup was opened manually, not triggered by a run "
-                                "failure. Voting is disabled.");
+                                "ending. Voting is disabled.");
         }
         ImGui::Separator();
 
-        ImGui::BeginDisabled(!timer_active);
-        for (size_t i = 0; i < kFailureReasonRoles.size(); i++) {
+        const bool locked_in = vote_pending_submit;
+        ImGui::BeginDisabled(locked_in || !timer_active);
+        for (size_t i = 0; i < kVoteRoles.size(); i++) {
+            if (is_mvp) {
+                // MVP credits exactly one role (including "Nobody" as "no standout") - a radio
+                // button group rather than the Failure vote's checkboxes, which can blame several
+                // roles for the same wipe at once.
+                if (ImGui::RadioButton(kVoteRoles[i], vote_role_checked[i])) {
+                    vote_role_checked.fill(false);
+                    vote_role_checked[i] = true;
+                }
+            }
             // "Nobody" is mutually exclusive with every other reason: checking it clears the rest,
             // and checking any other reason clears it.
-            if (ImGui::Checkbox(kFailureReasonRoles[i], &failure_role_checked[i]) && failure_role_checked[i]) {
-                if (i == kNobodyReasonIndex) {
-                    for (size_t j = 0; j < failure_role_checked.size(); j++) {
+            else if (ImGui::Checkbox(kVoteRoles[i], &vote_role_checked[i]) && vote_role_checked[i]) {
+                if (i == kNobodyVoteRoleIndex) {
+                    for (size_t j = 0; j < vote_role_checked.size(); j++) {
                         if (j != i) {
-                            failure_role_checked[j] = false;
+                            vote_role_checked[j] = false;
                         }
                     }
                 }
                 else {
-                    failure_role_checked[kNobodyReasonIndex] = false;
+                    vote_role_checked[kNobodyVoteRoleIndex] = false;
                 }
             }
         }
 
         if (ImGui::Button("Unselect All")) {
-            failure_role_checked.fill(false);
+            vote_role_checked.fill(false);
         }
         ImGui::EndDisabled();
 
-        if (!failure_submit_error.empty()) {
+        if (locked_in && !vote_run_id_known) {
             ImGui::Separator();
-            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", failure_submit_error.c_str());
+            ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f),
+                                "Vote recorded - will submit once this run finishes uploading.");
+        }
+
+        if (!vote_submit_error.empty()) {
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", vote_submit_error.c_str());
         }
 
         ImGui::Separator();
-        const bool submitting = submit_request && submit_request->IsPending();
-        ImGui::BeginDisabled(submitting || !timer_active);
+        ImGui::BeginDisabled(locked_in || !timer_active);
         if (ImGui::Button("Submit Vote")) {
-            ReportFailurePayload payload{.run_id = pending_failure_run_id};
-            for (size_t i = 0; i < kFailureReasonRoles.size(); i++) {
-                if (failure_role_checked[i]) {
-                    payload.roles.emplace_back(kFailureReasonRoles[i]);
-                }
-            }
-
-            std::string url;
-            ComposeUrl(url, kBaseUrl, kReportFailurePath);
-
-            submit_request = std::make_unique<AsyncRestClient>();
-            submit_request->SetUrl(url.c_str());
-            submit_request->SetMethod(HttpMethod::Post);
-            submit_request->SetHeader("Content-Type", "application/json");
-            submit_request->SetHeader("X-Machine-Key", machine_key.c_str());
-            submit_request->SetHeader("X-Plugin-Version", std::to_string(kPluginVersion).c_str());
-            submit_request->SetPostContent(glz::write_json(payload).value_or(std::string{}), ContentFlag::Copy);
-            submit_request->SetTimeoutSec(10);
-            submit_request->SetConnectTimeoutSec(5);
-            submit_request->SetVerifyPeer(true);
-            submit_request->SetVerifyHost(true);
-            failure_submit_error.clear();
-            submit_request->ExecuteAsync();
+            FireVoteSubmit();
         }
         ImGui::EndDisabled();
         ImGui::SameLine();
         if (ImGui::Button("Dismiss")) {
-            show_failure_popup = false;
-            failure_popup_opened_tick = 0;
+            ResetVoteState();
         }
     }
     ImGui::End();
@@ -1340,7 +1692,7 @@ void SCTracker::DrawFailurePopup()
 
 void SCTracker::Draw(IDirect3DDevice9*)
 {
-    DrawFailurePopup();
+    DrawVotePopup();
 }
 
 void SCTracker::LoadSettings(const wchar_t* folder)
@@ -1368,12 +1720,12 @@ void SCTracker::DrawSettings()
         if (latest_known_plugin_version > 0) {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
                                 "This SCTracker build is out of date (yours: %d, latest: %d). Syncing and "
-                                "failure reporting are disabled until you redownload from gwsctracker.com/account.",
+                                "vote reporting are disabled until you redownload from gwsctracker.com/account.",
                                 kPluginVersion, latest_known_plugin_version);
         }
         else {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
-                                "This SCTracker build is out of date. Syncing and failure reporting are "
+                                "This SCTracker build is out of date. Syncing and vote reporting are "
                                 "disabled until you redownload from gwsctracker.com/account.");
         }
         ImGui::Separator();
@@ -1397,13 +1749,13 @@ void SCTracker::DrawSettings()
     if (ImGui::InputText("Machine Key", machine_key_buf, sizeof(machine_key_buf), ImGuiInputTextFlags_Password)) {
         machine_key = machine_key_buf;
     }
-    ImGui::Text("Sync queue: %zu pending", sync_queue.size());
+    ImGui::Text("Sync: %s", pending_sync ? "1 pending" : "idle");
     if (last_persisted_utc_start) {
         std::string time_str;
         PluginUtils::TimeToString(last_persisted_utc_start, time_str);
         ImGui::Text("Last synced run: %s", time_str.c_str());
     }
     if (!machine_key.empty()) {
-        ImGui::Text("Failure reporting: %s", can_report_failures ? "enabled" : "not permitted for this key");
+        ImGui::Text("Vote reporting: %s", can_report_failures ? "enabled" : "not permitted for this key");
     }
 }

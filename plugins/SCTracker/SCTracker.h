@@ -276,10 +276,11 @@ private:
 
     enum class PostRunVoteKind : uint8_t { None, Failure, Mvp };
 
-    // Opens the popup for utc_start's run, unless a different run's ALREADY-COMMITTED vote is still
-    // awaiting its run_id (see OpenVote's own comment) - an uncommitted/ignored vote can never reach
-    // that state, since DrawVotePopup's auto-close does a full reset unless something was committed.
-    void OpenVote(PostRunVoteKind kind, uint32_t utc_start);
+    // Opens the popup for utc_start's run (on map_id, which decides which vote roles are offered -
+    // see DrawVotePopup), unless a different run's ALREADY-COMMITTED vote is still awaiting its
+    // run_id (see OpenVote's own comment) - an uncommitted/ignored vote can never reach that state,
+    // since DrawVotePopup's auto-close does a full reset unless something was committed.
+    void OpenVote(PostRunVoteKind kind, uint32_t map_id, uint32_t utc_start);
     void ResetVoteState();
     void CancelPendingVoteIfMatching(uint32_t utc_start);
     void FireVoteSubmit();
@@ -288,6 +289,8 @@ private:
     PostRunVoteKind pending_vote_kind = PostRunVoteKind::None;
     uint32_t pending_vote_utc_start = 0; // 0 = no vote in flight; correlates ProcessSync's later
                                           // run_id lookup back to this vote (see OpenVote/ProcessSync)
+    uint32_t pending_vote_map_id = 0;    // map the pending vote's run was on - decides which
+                                          // kVoteRoles entries the popup offers (see DrawVotePopup)
     int64_t pending_vote_run_id = 0;
     bool vote_run_id_known = false; // explicit bool - 0 is a plausible db id, can't use as sentinel
     // True once "Submit Vote" is clicked, even before vote_run_id_known - FireVoteSubmit no-ops
@@ -295,7 +298,7 @@ private:
     // Locks the popup's controls (see DrawVotePopup) and, on a failed send, is reset back to false
     // (see ProcessVoteSubmit) so the existing retry-after-failure UX keeps working.
     bool vote_pending_submit = false;
-    std::array<bool, 12> vote_role_checked{}; // parallel to kVoteRoles; shared by both vote kinds
+    std::array<bool, 13> vote_role_checked{}; // parallel to kVoteRoles; shared by both vote kinds
     std::string vote_submit_error;            // non-empty renders as an inline error in the popup
     std::unique_ptr<AsyncRestClient> submit_request;
     uint64_t vote_popup_opened_tick = 0; // 0 = no vote window active (manually-opened popup)

@@ -35,6 +35,7 @@
 #include <fstream>
 #include <optional>
 #include <sstream>
+#include <string_view>
 
 // Mirrors the shape written to disk; kept separate from the live SCTracker::PartyMember only in
 // name, not in fields. Needs external linkage (i.e. can't live in an anonymous namespace) — glaze's
@@ -120,14 +121,15 @@ namespace {
     // Static role vocabulary shared by both vote kinds (see SCTracker::PostRunVoteKind) - blame a
     // role for a failed run (Failure, multi-select checkboxes - several roles can share blame for
     // the same wipe), or credit exactly one role for a successful run (Mvp, single-select radio
-    // buttons - see DrawVotePopup). Mirrors the backend's RoleDerivation output exactly (T1-T3 from
-    // the plugin's own role_hint, the rest from server-side profession-combo derivation the plugin
-    // has no visibility into) - see SCTracker::vote_role_checked's comment. For a failure vote,
-    // "Nobody" (no player at fault - e.g. a disconnect, lag spike, or bad luck) records a
-    // run_failure_reasons row with no run_participant attached - see FailureReportService.submit on
-    // the backend.
-    constexpr std::array<const char*, 12> kVoteRoles = {
-        "T1", "T2", "T3", "T4", "LT", "Spiker", "Derv", "SoS", "Necro", "RangerNecro", "Emo", "Nobody",
+    // buttons - see DrawVotePopup). Mirrors the backend's RoleDerivation output exactly: T1-T3 from
+    // the plugin's own role_hint and the rest from server-side profession-combo derivation for the
+    // Underworld trapper model; "Ranger"/"Derv" for the Fissure of Woe duo (role = primary
+    // profession, RoleModel.PRIMARY_PROFESSION). DrawVotePopup only offers the entries that can
+    // actually validate for the run's map (see VoteRoleVisibleForMap). For a failure vote, "Nobody"
+    // (no player at fault - e.g. a disconnect, lag spike, or bad luck) records a run_failure_reasons
+    // row with no run_participant attached - see FailureReportService.submit on the backend.
+    constexpr std::array<const char*, 13> kVoteRoles = {
+        "T1", "T2", "T3", "T4", "LT", "Spiker", "Derv", "SoS", "Necro", "RangerNecro", "Emo", "Ranger", "Nobody",
     };
     // "Nobody" must stay last in kVoteRoles - DrawVotePopup uses this index to enforce mutual
     // exclusivity between it and every other reason for a Failure vote (checking one clears the
@@ -152,13 +154,60 @@ namespace {
     // kDhuumHostileAllegianceBits above.
     constexpr uint32_t kDhuumObjectiveId = 157;
 
-    // Only The Underworld is supported right now - the backend doesn't handle any other map id yet.
-    // This used to mirror the full set ObjectiveTimerWindow::AddObjectiveSet() tracks
-    // (GWToolboxdll/Windows/ObjectiveTimerWindow.cpp); re-expand from that switch statement (elite
-    // areas, dungeons, ToPK) once the backend supports them again.
+    // Instances GWToolboxdll's ObjectiveTimerWindow tracks AND the backend accepts (map_configs).
+    // Re-expand from ObjectiveTimerWindow::AddObjectiveSet()'s switch (more elite areas, dungeons,
+    // ToPK) as the backend gains map_configs rows for them.
     const std::unordered_set<uint32_t> kTrackedMapIds = {
         static_cast<uint32_t>(GW::Constants::MapID::The_Underworld),
+        static_cast<uint32_t>(GW::Constants::MapID::The_Fissure_of_Woe),
     };
+
+    // Whether the backend has a map_configs row for this (tracked map, real-player count): the
+    // Underworld is 8-man; the Fissure of Woe supports both a 2-person duo and a full 8-man. A run
+    // whose CountRealPlayers matches no config is never published and never opens a vote (ProcessSync).
+    bool IsAcceptablePartySize(const uint32_t map_id, const uint32_t real_player_count)
+    {
+        switch (static_cast<GW::Constants::MapID>(map_id)) {
+            case GW::Constants::MapID::The_Fissure_of_Woe:
+                return real_player_count == 2 || real_player_count == 8;
+            default: // The_Underworld and any future 8-man-only tracked area
+                return real_player_count == 8;
+        }
+    }
+
+    // Whether a (map, real-player count) run has a role model at all. The Underworld trapper team
+    // and the Fissure of Woe duo do (T1-T3 / Ranger-Derv); FoW 8-man has no fixed composition
+    // (map_configs.role_model = NULL), so its runs get no post-run failure/MVP vote - there are no
+    // roles to blame or credit. Keep in sync with the backend's map_configs.
+    bool MapSizeHasRoles(const uint32_t map_id, const uint32_t real_player_count)
+    {
+        if (static_cast<GW::Constants::MapID>(map_id) == GW::Constants::MapID::The_Fissure_of_Woe) {
+            return real_player_count == 2;
+        }
+        return true; // The_Underworld
+    }
+
+    // Whether this map's run mechanics revolve around the UW Dhuum fight. Gates the death-cutoff
+    // latch (dhuum_started), the post-Dhuum gambling ritual, and the dhuum_completed end-reason
+    // shortcut - none of which have a Fissure of Woe analogue. FoW run completion falls back to
+    // ProcessSync's map-agnostic IsRunCompleted (objectives.back().status == Completed).
+    bool MapHasDhuumMechanics(const uint32_t map_id)
+    {
+        return static_cast<GW::Constants::MapID>(map_id) == GW::Constants::MapID::The_Underworld;
+    }
+
+    // Which kVoteRoles entries the post-run popup offers for a run on map_id. The Underworld shows
+    // all of them (the plugin can't see the server's profession-combo derivation, so it can't
+    // pre-filter). The Fissure of Woe duo's role model only ever yields Ranger/Derv, so only those
+    // (plus "Nobody") can validate server-side - showing the rest would just be dead buttons.
+    bool VoteRoleVisibleForMap(const uint32_t map_id, const size_t role_index)
+    {
+        if (static_cast<GW::Constants::MapID>(map_id) != GW::Constants::MapID::The_Fissure_of_Woe) {
+            return true; // Underworld: can't pre-filter the server's profession-combo derivation
+        }
+        const std::string_view role = kVoteRoles[role_index];
+        return role == "Ranger" || role == "Derv" || role == "Nobody";
+    }
 
     // Encoded item-identity token for "Ghastly Summoning Stone" (GW::Constants::ItemID::GhastlyStone,
     // model_id 32557) - GW's fixed per-template control-code sequence for this item, matching
@@ -382,9 +431,9 @@ namespace {
         return !objective_set.objectives.empty() && objective_set.objectives.back().status == kObjectiveStatusCompleted;
     }
 
-    // party_members.size() alone isn't enough to identify a real 8-man guild run - a solo player
-    // filling the other 7 slots with heroes/henchmen also occupies all 8 slots. Count only real
-    // players (is_player == true) instead.
+    // party_members.size() alone isn't enough to identify a real guild run - a solo player filling
+    // the rest of an 8-slot party with heroes/henchmen still occupies every slot. Count only real
+    // players (is_player == true), then check it against IsAcceptablePartySize for the map.
     uint32_t CountRealPlayers(const std::vector<SCTracker::PartyMember>& members)
     {
         return static_cast<uint32_t>(std::ranges::count_if(members, &SCTracker::PartyMember::is_player));
@@ -620,9 +669,10 @@ void SCTracker::OnWriteToChatLog(const wchar_t* message)
         return;
     }
 
-    // Post-Dhuum gambling ritual (see PartyMember::gambling_stone_net). Gated on dhuum_completed as a
-    // cheap belt-and-suspenders check alongside the exact item-name token match below.
-    if (!dhuum_completed) {
+    // Post-Dhuum gambling ritual (see PartyMember::gambling_stone_net) - Underworld-only, and only
+    // after Dhuum is down. dhuum_completed can never latch off the Underworld (OnObjectiveDone is
+    // map-gated), so the map check is redundant belt-and-suspenders, kept for clarity.
+    if (!MapHasDhuumMechanics(pending_map_id) || !dhuum_completed) {
         return;
     }
     switch (message[0]) {
@@ -746,7 +796,8 @@ void SCTracker::OnUpdateAgentState(const uint32_t agent_id, const uint32_t state
 // fight (e.g. the tank) are expected, not run-ending mistakes.
 void SCTracker::OnAgentUpdateAllegiance(const uint32_t agent_id, const uint32_t allegiance_bits)
 {
-    if (!run_active || dhuum_started || allegiance_bits != kDhuumHostileAllegianceBits) {
+    if (!run_active || dhuum_started || !MapHasDhuumMechanics(pending_map_id)
+        || allegiance_bits != kDhuumHostileAllegianceBits) {
         return;
     }
     const GW::Agent* agent = GW::Agents::GetAgentByID(agent_id);
@@ -758,10 +809,12 @@ void SCTracker::OnAgentUpdateAllegiance(const uint32_t agent_id, const uint32_t 
 
 // GAME_SMSG_MISSION_OBJECTIVE_COMPLETE - fires for any completed native mission objective, not just
 // Dhuum's; only kDhuumObjectiveId is relevant here. Latches dhuum_completed for the rest of the run;
-// OnItemGeneral stops counting Glob of Ectoplasm drops once it's set.
+// OnItemGeneral stops counting Glob of Ectoplasm drops once it's set, and OnGameSrvTransfer uses it
+// as the "run completed" shortcut. Underworld-only: elsewhere dhuum_completed stays false and run
+// completion is decided by ProcessSync's map-agnostic IsRunCompleted fallback.
 void SCTracker::OnObjectiveDone(const uint32_t objective_id)
 {
-    if (!run_active || objective_id != kDhuumObjectiveId) {
+    if (!run_active || !MapHasDhuumMechanics(pending_map_id) || objective_id != kDhuumObjectiveId) {
         return;
     }
     dhuum_completed = true;
@@ -982,12 +1035,14 @@ void SCTracker::OnGameSrvTransfer()
 
     // Open the post-run vote immediately using this locally-known outcome, rather than waiting for
     // ProcessSync to publish (which needs GWToolboxdll's own delayed objective file) - see OpenVote.
-    if (can_report_failures && !plugin_outdated) {
+    // Skipped for a role-less (map, size) like FoW 8-man - there are no roles to blame or credit.
+    if (can_report_failures && !plugin_outdated
+        && MapSizeHasRoles(pending_map_id, CountRealPlayers(party_members))) {
         if (end_reason == "wipe" || end_reason == "resign") {
-            OpenVote(PostRunVoteKind::Failure, pending_utc_start);
+            OpenVote(PostRunVoteKind::Failure, pending_map_id, pending_utc_start);
         }
         else if (end_reason == "completed") {
-            OpenVote(PostRunVoteKind::Mvp, pending_utc_start);
+            OpenVote(PostRunVoteKind::Mvp, pending_map_id, pending_utc_start);
         }
         // "unknown" opens nothing.
     }
@@ -1265,17 +1320,18 @@ void SCTracker::ProcessSync()
     // only stops at an entry that's either ready to publish or still within its give-up window.
     // Resolving a disqualified entry immediately searches for the next oldest one via
     // FindNextPendingEntry(), so several already-known-disqualified runs still drain within one
-    // ProcessSync() tick instead of one per scan interval. Only full 8-man parties of real players
-    // are meaningful for the leaderboard backend (a solo player filling the other 7 slots with
-    // heroes/henchmen still occupies all 8 slots but isn't a guild run), and a run with no matching
-    // GWToolboxdll objective entry can never be leaderboard-eligible anyway. Both cases mark the
-    // entry synced instead of retrying it forever.
+    // ProcessSync() tick instead of one per scan interval. Only a real-player party matching one of
+    // the map's backend map_configs sizes is meaningful for the leaderboard (8 for the Underworld,
+    // 2 or 8 for the Fissure of Woe - IsAcceptablePartySize; a solo player filling the rest of an
+    // 8-slot party with heroes/henchmen isn't a guild run), and a run with no matching GWToolboxdll
+    // objective entry can never be leaderboard-eligible anyway. Both cases mark the entry synced
+    // instead of retrying it forever - which also cancels any pending vote (CancelPendingVoteIfMatching).
     bool advanced_watermark = false;
     RemoteObjectiveSet objective_set;
     bool have_objective = false;
     while (pending_sync) {
         auto& front = *pending_sync;
-        if (CountRealPlayers(front.party_members) != 8) {
+        if (!IsAcceptablePartySize(front.map_id, CountRealPlayers(front.party_members))) {
             last_persisted_utc_start = front.utc_start;
             CancelPendingVoteIfMatching(front.utc_start); // before front is invalidated below
             last_queue_scan_tick = now;
@@ -1323,8 +1379,9 @@ void SCTracker::ProcessSync()
                                                       // regardless of that
         next.end_reason = "completed";
         WriteLogEntry(next.utc_start, next.map_id, next.character_name, next.end_reason, next.party_members);
-        if (can_report_failures && !plugin_outdated) {
-            OpenVote(PostRunVoteKind::Mvp, next.utc_start); // late but real - better late than never
+        if (can_report_failures && !plugin_outdated
+            && MapSizeHasRoles(next.map_id, CountRealPlayers(next.party_members))) {
+            OpenVote(PostRunVoteKind::Mvp, next.map_id, next.utc_start); // late but real - better late than never
         }
     }
 
@@ -1410,7 +1467,7 @@ void SCTracker::ProcessPermissionCheck()
 // pending_vote_utc_start can never reach here nonzero for a DIFFERENT run, since DrawVotePopup's
 // auto-close fully resets uncommitted votes (see its comment) rather than leaving stale state that
 // would block every future vote forever.
-void SCTracker::OpenVote(const PostRunVoteKind kind, const uint32_t utc_start)
+void SCTracker::OpenVote(const PostRunVoteKind kind, const uint32_t map_id, const uint32_t utc_start)
 {
     if (vote_pending_submit && !vote_run_id_known && pending_vote_utc_start != 0 && pending_vote_utc_start != utc_start) {
         AppendLog(std::format("Skipped opening a vote for run {}: a committed vote for run {} is still awaiting its run_id",
@@ -1419,6 +1476,7 @@ void SCTracker::OpenVote(const PostRunVoteKind kind, const uint32_t utc_start)
     }
     pending_vote_kind = kind;
     pending_vote_utc_start = utc_start;
+    pending_vote_map_id = map_id;
     pending_vote_run_id = 0;
     vote_run_id_known = false;
     vote_pending_submit = false;
@@ -1433,6 +1491,7 @@ void SCTracker::ResetVoteState()
     show_vote_popup = false;
     pending_vote_kind = PostRunVoteKind::None;
     pending_vote_utc_start = 0;
+    pending_vote_map_id = 0;
     pending_vote_run_id = 0;
     vote_run_id_known = false;
     vote_pending_submit = false;
@@ -1442,8 +1501,8 @@ void SCTracker::ResetVoteState()
 }
 
 // No-op unless a vote is actually pending for utc_start - this run either turned out not to be a
-// real failure (resign-that-actually-completed correction), or will never get a run_id (non-8-man
-// skip / give-up-timeout drop).
+// real failure (resign-that-actually-completed correction), or will never get a run_id (wrong-size
+// party skip / give-up-timeout drop).
 void SCTracker::CancelPendingVoteIfMatching(const uint32_t utc_start)
 {
     if (pending_vote_utc_start == utc_start && pending_vote_utc_start != 0) {
@@ -1635,6 +1694,12 @@ void SCTracker::DrawVotePopup()
         const bool locked_in = vote_pending_submit;
         ImGui::BeginDisabled(locked_in || !timer_active);
         for (size_t i = 0; i < kVoteRoles.size(); i++) {
+            // Only offer roles that can actually validate for this run's map - for a Fissure of Woe
+            // duo that's just Ranger/Derv/Nobody (see VoteRoleVisibleForMap); a hidden role is
+            // never checked, so FireVoteSubmit never sends it.
+            if (!VoteRoleVisibleForMap(pending_vote_map_id, i)) {
+                continue;
+            }
             if (is_mvp) {
                 // MVP credits exactly one role (including "Nobody" as "no standout") - a radio
                 // button group rather than the Failure vote's checkboxes, which can blame several

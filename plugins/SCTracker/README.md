@@ -10,12 +10,14 @@ GWToolboxdll itself.
 
 - Captures who was in the party (players/heroes/henchmen, professions, death count) and how each
   tracked explorable-area run ended (`wipe`/`resign`/`completed`/`unknown`).
-- Only for instances GWToolboxdll's Objective Timer actually tracks (elite areas, dungeons, ToPK) —
-  random missions/vanquishes/DoA are skipped entirely, since they'd never correlate with anything.
+- Currently tracks **The Underworld** (8-man) and **The Fissure of Woe** (2-person duos and 8-man) —
+  the maps/sizes the backend has configs for. Other instances GWToolboxdll's Objective Timer tracks
+  (more elite areas, dungeons, ToPK) plus random missions/vanquishes/DoA are skipped entirely.
 - Periodically reads its own local log and GWToolboxdll's `ObjectiveTimerRuns_*.json`, and publishes
   the combined party + objective payload for each run to the backend, machine-key authenticated.
-  Only 8-man parties are published; smaller parties are dropped from the sync queue without an
-  upload attempt.
+  Only real-player parties matching a supported size (8 for the Underworld; 2 or 8 for the Fissure
+  of Woe) are published; anything else is dropped from the sync queue without an upload attempt.
+  The post-run failure/MVP vote is skipped for runs with no role composition (FoW 8-man).
 
 ## Files written (in your `Documents\GWToolboxpp\<computer>\` folder)
 

@@ -3,13 +3,8 @@
 #include <ToolboxUIPlugin.h>
 
 #include <IconsFontAwesome5.h>
+#include <GWCA/GameEntities/Item.h>
 
-namespace GW 
-{
-    struct Item;
-    struct ItemModifier;
-    enum class DyeColor : uint8_t;
-}
 struct InventoryItem 
 {
     uint32_t modelID = 0;

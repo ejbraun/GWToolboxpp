@@ -241,6 +241,31 @@ jobs:
         gcloud storage cp staging/plugins/SCTracker.version.json \
           "gs://$BUCKET/sctracker/SCTracker.version.json" --cache-control=no-cache
 
+    # --- fork-only: publish every other staged plugin to its own bucket prefix ---
+    # The backend's `modules` registry (gwsctracker, spec 08-module-entitlements) reads each plugin
+    # from gs://<bucket>/plugins/<Name>/<Name>.dll + <Name>.version.json. SCTracker keeps its legacy
+    # sctracker/ path (handled above) and is skipped here. Same DLL-before-manifest ordering and
+    # --cache-control as the SCTracker step, same GCP_SA_KEY / GCP_PLUGIN_BUCKET.
+    - name: Publish other plugins to GCS
+      if: github.ref == 'refs/heads/master' && github.repository != 'gwdevhub/GWToolboxpp' && env.GCP_SA_KEY != ''
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: |
+        BUCKET="${{ vars.GCP_PLUGIN_BUCKET }}"
+        if [ -z "$BUCKET" ]; then
+          echo "GCP_PLUGIN_BUCKET repo variable is not set; skipping"; exit 0
+        fi
+        shopt -s nullglob
+        for dll in staging/plugins/*.dll; do
+          name="$(basename "$dll" .dll)"
+          [ "$name" = "SCTracker" ] && continue
+          gcloud storage cp "$dll" "gs://$BUCKET/plugins/$name/$name.dll" --cache-control=no-cache
+          if [ -f "staging/plugins/$name.version.json" ]; then
+            gcloud storage cp "staging/plugins/$name.version.json" \
+              "gs://$BUCKET/plugins/$name/$name.version.json" --cache-control=no-cache
+          fi
+        done
+
     - name: Create release
       if: steps.version.outputs.should_release == 'true'
       shell: bash

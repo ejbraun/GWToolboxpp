@@ -205,12 +205,13 @@ jobs:
     # sha256 post-sign. This fork has no signing secrets, so it ships everything
     # unsigned and those steps are omitted entirely.
 
-    # --- fork-only: publish SCTracker to the backend's private GCS bucket -------
-    # The backend fetches SCTracker.dll + SCTracker.version.json from this bucket
-    # at runtime (1h cache) instead of bundling them in its image, so a plugin-only
-    # update needs no backend redeploy. Runs on every master build (mirrors
-    # "Publish rolling plugins-latest"). Needs the GCP_SA_KEY secret + the
-    # GCP_PLUGIN_BUCKET repo variable; a no-op on forks without them.
+    # --- fork-only: publish every plugin to the backend's private GCS bucket ----
+    # The gwsctracker backend fetches each plugin's <Name>.dll + <Name>.version.json
+    # from gs://<bucket>/plugins/<Name>/ at runtime instead of bundling them, so a
+    # plugin-only update needs no backend redeploy (SCTracker via PluginArtifactCache;
+    # the rest via the `modules` registry, spec 08-module-entitlements). Runs on
+    # every master build. Needs the GCP_SA_KEY secret + the GCP_PLUGIN_BUCKET repo
+    # variable; a no-op on forks without them.
     - name: Authenticate to Google Cloud (plugin bucket)
       if: github.ref == 'refs/heads/master' && github.repository != 'gwdevhub/GWToolboxpp' && env.GCP_SA_KEY != ''
       uses: google-github-actions/auth@v2
@@ -221,32 +222,7 @@ jobs:
       if: github.ref == 'refs/heads/master' && github.repository != 'gwdevhub/GWToolboxpp' && env.GCP_SA_KEY != ''
       uses: google-github-actions/setup-gcloud@v2
 
-    - name: Publish SCTracker plugin to GCS
-      if: github.ref == 'refs/heads/master' && github.repository != 'gwdevhub/GWToolboxpp' && env.GCP_SA_KEY != ''
-      shell: bash
-      working-directory: ${{ github.workspace }}
-      run: |
-        if [ ! -f staging/plugins/SCTracker.dll ]; then
-          echo "no SCTracker build staged; nothing to publish"; exit 0
-        fi
-        BUCKET="${{ vars.GCP_PLUGIN_BUCKET }}"
-        if [ -z "$BUCKET" ]; then
-          echo "GCP_PLUGIN_BUCKET repo variable is not set; skipping"; exit 0
-        fi
-        # DLL first, manifest second: a backend refresh racing the two uploads then
-        # never sees a manifest sha256 pointing ahead of the bytes. --cache-control
-        # keeps any GCS/CDN layer from stacking staleness on the backend's own TTL.
-        gcloud storage cp staging/plugins/SCTracker.dll \
-          "gs://$BUCKET/sctracker/SCTracker.dll" --cache-control=no-cache
-        gcloud storage cp staging/plugins/SCTracker.version.json \
-          "gs://$BUCKET/sctracker/SCTracker.version.json" --cache-control=no-cache
-
-    # --- fork-only: publish every other staged plugin to its own bucket prefix ---
-    # The backend's `modules` registry (gwsctracker, spec 08-module-entitlements) reads each plugin
-    # from gs://<bucket>/plugins/<Name>/<Name>.dll + <Name>.version.json. SCTracker keeps its legacy
-    # sctracker/ path (handled above) and is skipped here. Same DLL-before-manifest ordering and
-    # --cache-control as the SCTracker step, same GCP_SA_KEY / GCP_PLUGIN_BUCKET.
-    - name: Publish other plugins to GCS
+    - name: Publish plugins to GCS
       if: github.ref == 'refs/heads/master' && github.repository != 'gwdevhub/GWToolboxpp' && env.GCP_SA_KEY != ''
       shell: bash
       working-directory: ${{ github.workspace }}
@@ -256,15 +232,20 @@ jobs:
           echo "GCP_PLUGIN_BUCKET repo variable is not set; skipping"; exit 0
         fi
         shopt -s nullglob
+        published=0
         for dll in staging/plugins/*.dll; do
           name="$(basename "$dll" .dll)"
-          [ "$name" = "SCTracker" ] && continue
+          # DLL first, manifest second: a backend refresh racing the two uploads then
+          # never sees a manifest sha256 pointing ahead of the bytes. --cache-control
+          # keeps any GCS/CDN layer from stacking staleness on the backend's own TTL.
           gcloud storage cp "$dll" "gs://$BUCKET/plugins/$name/$name.dll" --cache-control=no-cache
           if [ -f "staging/plugins/$name.version.json" ]; then
             gcloud storage cp "staging/plugins/$name.version.json" \
               "gs://$BUCKET/plugins/$name/$name.version.json" --cache-control=no-cache
           fi
+          published=$((published + 1))
         done
+        echo "published $published plugin(s) to gs://$BUCKET/plugins/"
 
     - name: Create release
       if: steps.version.outputs.should_release == 'true'

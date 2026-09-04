@@ -140,7 +140,7 @@ add_custom_command(TARGET DBBox POST_BUILD
 # this one variable (the compiled-in kPluginVersion constant and the version field of the
 # SCTracker.version.json manifest emitted next to the dll) stays in sync automatically, so there's
 # nothing else to edit by hand.
-set(SCTRACKER_PLUGIN_VERSION 13 CACHE STRING "SCTracker plugin protocol version (see PluginVersion.generated.h.in)" FORCE)
+set(SCTRACKER_PLUGIN_VERSION 14 CACHE STRING "SCTracker plugin protocol version (see PluginVersion.generated.h.in)" FORCE)
 
 # Passing the version as the 2nd arg makes add_tb_plugin() put it in SCTracker.version.json;
 # the name / compiled_at / sha256 fields are written for every plugin regardless.

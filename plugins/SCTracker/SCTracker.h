@@ -10,6 +10,7 @@
 #include <RestClient.h>
 
 #include <array>
+#include <deque>
 #include <memory>
 #include <optional>
 #include <string>
@@ -263,12 +264,14 @@ private:
     uint64_t last_publish_attempt_tick = 0; // backoff timer, only advanced on a failed publish
 
     // --- Post-run voting ---
-    // Two vote kinds share one popup/trigger/defer/cancel pipeline: Failure (wipe/resign, blame a
-    // role) and Mvp (completed, credit a role) - both use the same role vocabulary/UI mechanics
-    // (kVoteRoles in the .cpp). Popup opens immediately at run-end from OnGameSrvTransfer's locally-
-    // known end_reason (not from ProcessSync/GWToolboxdll's delayed file) - see OpenVote. Submission
-    // is deferred until the server-assigned run_id is known (see ProcessSync's correlation block and
-    // FireVoteSubmit), since run_id doesn't exist until the run publishes successfully.
+    // Two vote kinds share one popup/trigger/defer/cancel pipeline: Failure (wipe/resign, blame) and
+    // Mvp (completed, credit). Both vote by role (kVoteRoles in the .cpp) for a run whose (map,
+    // party_size) config has a role model, or by character name (pending_vote_names) for one that
+    // doesn't - see pending_vote_has_roles, decided per OpenVote call from MapSizeHasRoles. Popup
+    // opens immediately at run-end from OnGameSrvTransfer's locally-known end_reason (not from
+    // ProcessSync/GWToolboxdll's delayed file) - see OpenVote. Submission is deferred until the
+    // server-assigned run_id is known (see ProcessSync's correlation block and FireVoteSubmit),
+    // since run_id doesn't exist until the run publishes successfully.
     //
     // can_report_failures gates all of it, same as before - deliberately NOT renamed even though it
     // now gates two vote kinds (reusing the existing can-report-run-failure permission check, no new
@@ -286,8 +289,10 @@ private:
     // Opens the popup for utc_start's run (on map_id, which decides which vote roles are offered -
     // see DrawVotePopup), unless a different run's ALREADY-COMMITTED vote is still awaiting its
     // run_id (see OpenVote's own comment) - an uncommitted/ignored vote can never reach that state,
-    // since DrawVotePopup's auto-close does a full reset unless something was committed.
-    void OpenVote(PostRunVoteKind kind, uint32_t map_id, uint32_t utc_start);
+    // since DrawVotePopup's auto-close does a full reset unless something was committed. members is
+    // the run's captured roster, needed to populate pending_vote_names when MapSizeHasRoles(map_id,
+    // CountRealPlayers(members)) is false - see pending_vote_has_roles.
+    void OpenVote(PostRunVoteKind kind, uint32_t map_id, uint32_t utc_start, const std::vector<PartyMember>& members);
     void ResetVoteState();
     void CancelPendingVoteIfMatching(uint32_t utc_start);
     void FireVoteSubmit();
@@ -306,7 +311,23 @@ private:
     // (see ProcessVoteSubmit) so the existing retry-after-failure UX keeps working.
     bool vote_pending_submit = false;
     std::array<bool, 13> vote_role_checked{}; // parallel to kVoteRoles; shared by both vote kinds
-    std::string vote_submit_error;            // non-empty renders as an inline error in the popup
+    // Set in OpenVote from MapSizeHasRoles(map_id, real_player_count) for this run. true -> the
+    // popup/submit use kVoteRoles/vote_role_checked as always; false -> this run's (map, party_size)
+    // config has no role model (any non-duo FoW size, Domain of Anguish), so the popup instead lists
+    // pending_vote_names/vote_name_checked - crediting/blaming a specific character rather than a
+    // role (see specs/features/fow-and-party-size.md sec 9.6 on the backend).
+    bool pending_vote_has_roles = true;
+    // Real players (is_player only - crediting/blaming a hero or henchman is meaningless) captured
+    // at OpenVote time for this run, with a trailing synthetic "Nobody" appended so the same
+    // last-index-is-"Nobody" mutual-exclusivity logic as kNobodyVoteRoleIndex/vote_role_checked
+    // works unchanged for the name-mode branch. Only populated when pending_vote_has_roles is false.
+    std::vector<std::string> pending_vote_names;
+    // deque<bool>, not vector<bool>: ImGui::Checkbox/&vote_name_checked[i] needs a real bool*, and
+    // vector<bool> is the bit-packed specialization that can't provide one (operator[] returns a
+    // proxy, not a bool&). deque<bool> has no such specialization. Parallel to pending_vote_names;
+    // dynamic since roster size varies, unlike kVoteRoles/vote_role_checked's fixed 13.
+    std::deque<bool> vote_name_checked;
+    std::string vote_submit_error;       // non-empty renders as an inline error in the popup
     std::unique_ptr<AsyncRestClient> submit_request;
     uint64_t vote_popup_opened_tick = 0; // 0 = no vote window active (manually-opened popup)
 

@@ -31,6 +31,7 @@
 
 #include <glaze/glaze.hpp>
 
+#include <algorithm>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -191,9 +192,10 @@ namespace {
 
     // Whether a (map, real-player count) run has a role model at all. The Underworld trapper team
     // and the Fissure of Woe *duo* do (T1-T3 / Ranger-Derv); every other FoW size and all of
-    // Domain of Anguish have no fixed composition (map_configs.role_model = NULL), so those runs
-    // get no post-run failure/MVP vote - there are no roles to blame or credit. Keep in sync with
-    // the backend's map_configs.
+    // Domain of Anguish have no fixed composition (map_configs.role_model = NULL). OpenVote still
+    // opens a post-run vote for these - MapSizeHasRoles just decides whether it credits/blames a
+    // role (true) or a specific character by name (false, see pending_vote_has_roles) - there's no
+    // "no vote at all" case anymore. Keep in sync with the backend's map_configs.
     bool MapSizeHasRoles(const uint32_t map_id, const uint32_t real_player_count)
     {
         switch (static_cast<GW::Constants::MapID>(map_id)) {
@@ -1065,14 +1067,15 @@ void SCTracker::OnGameSrvTransfer()
 
     // Open the post-run vote immediately using this locally-known outcome, rather than waiting for
     // ProcessSync to publish (which needs GWToolboxdll's own delayed objective file) - see OpenVote.
-    // Skipped for a role-less (map, size) like any non-duo FoW run - there are no roles to blame or credit.
-    if (can_report_failures && !plugin_outdated
-        && MapSizeHasRoles(pending_map_id, CountRealPlayers(party_members))) {
+    // A role-less (map, size) like any non-duo FoW run or Domain of Anguish still opens a vote -
+    // OpenVote itself switches it into name mode (credit/blame a character instead of a role) via
+    // MapSizeHasRoles.
+    if (can_report_failures && !plugin_outdated) {
         if (end_reason == "wipe" || end_reason == "resign") {
-            OpenVote(PostRunVoteKind::Failure, pending_map_id, pending_utc_start);
+            OpenVote(PostRunVoteKind::Failure, pending_map_id, pending_utc_start, party_members);
         }
         else if (end_reason == "completed") {
-            OpenVote(PostRunVoteKind::Mvp, pending_map_id, pending_utc_start);
+            OpenVote(PostRunVoteKind::Mvp, pending_map_id, pending_utc_start, party_members);
         }
         // "unknown" opens nothing.
     }
@@ -1409,9 +1412,8 @@ void SCTracker::ProcessSync()
                                                       // regardless of that
         next.end_reason = "completed";
         WriteLogEntry(next.utc_start, next.map_id, next.character_name, next.end_reason, next.party_members);
-        if (can_report_failures && !plugin_outdated
-            && MapSizeHasRoles(next.map_id, CountRealPlayers(next.party_members))) {
-            OpenVote(PostRunVoteKind::Mvp, next.map_id, next.utc_start); // late but real - better late than never
+        if (can_report_failures && !plugin_outdated) {
+            OpenVote(PostRunVoteKind::Mvp, next.map_id, next.utc_start, next.party_members); // late but real - better late than never
         }
     }
 
@@ -1497,7 +1499,8 @@ void SCTracker::ProcessPermissionCheck()
 // pending_vote_utc_start can never reach here nonzero for a DIFFERENT run, since DrawVotePopup's
 // auto-close fully resets uncommitted votes (see its comment) rather than leaving stale state that
 // would block every future vote forever.
-void SCTracker::OpenVote(const PostRunVoteKind kind, const uint32_t map_id, const uint32_t utc_start)
+void SCTracker::OpenVote(const PostRunVoteKind kind, const uint32_t map_id, const uint32_t utc_start,
+                          const std::vector<PartyMember>& members)
 {
     if (vote_pending_submit && !vote_run_id_known && pending_vote_utc_start != 0 && pending_vote_utc_start != utc_start) {
         AppendLog(std::format("Skipped opening a vote for run {}: a committed vote for run {} is still awaiting its run_id",
@@ -1511,9 +1514,22 @@ void SCTracker::OpenVote(const PostRunVoteKind kind, const uint32_t map_id, cons
     vote_run_id_known = false;
     vote_pending_submit = false;
     show_vote_popup = true;
-    vote_role_checked.fill(false);
     vote_submit_error.clear();
     vote_popup_opened_tick = GetTickCount64();
+
+    pending_vote_has_roles = MapSizeHasRoles(map_id, CountRealPlayers(members));
+    vote_role_checked.fill(false);
+    pending_vote_names.clear();
+    vote_name_checked.clear();
+    if (!pending_vote_has_roles) {
+        for (const auto& member : members) {
+            if (member.is_player) {
+                pending_vote_names.push_back(member.name);
+            }
+        }
+        pending_vote_names.emplace_back("Nobody"); // trailing sentinel - see pending_vote_names' own comment
+        vote_name_checked.assign(pending_vote_names.size(), false);
+    }
 }
 
 void SCTracker::ResetVoteState()
@@ -1526,6 +1542,9 @@ void SCTracker::ResetVoteState()
     vote_run_id_known = false;
     vote_pending_submit = false;
     vote_role_checked.fill(false);
+    pending_vote_has_roles = true;
+    pending_vote_names.clear();
+    vote_name_checked.clear();
     vote_submit_error.clear();
     vote_popup_opened_tick = 0;
 }
@@ -1552,9 +1571,22 @@ void SCTracker::FireVoteSubmit()
         return; // ProcessSync will call this again once the run_id resolves
     }
     ReportVotePayload payload{.run_id = pending_vote_run_id};
-    for (size_t i = 0; i < kVoteRoles.size(); i++) {
-        if (vote_role_checked[i]) {
-            payload.roles.emplace_back(kVoteRoles[i]);
+    if (pending_vote_has_roles) {
+        for (size_t i = 0; i < kVoteRoles.size(); i++) {
+            if (vote_role_checked[i]) {
+                payload.roles.emplace_back(kVoteRoles[i]);
+            }
+        }
+    }
+    else {
+        // Same payload.roles field, just carrying character names instead of role names for a
+        // role-less run's config - the backend resolves which interpretation applies per run (see
+        // MvpPersister/FailureReportPersister on the backend). "Nobody" (the trailing entry) is sent
+        // verbatim either way.
+        for (size_t i = 0; i < pending_vote_names.size(); i++) {
+            if (vote_name_checked[i]) {
+                payload.roles.emplace_back(pending_vote_names[i]);
+            }
         }
     }
 
@@ -1723,40 +1755,75 @@ void SCTracker::DrawVotePopup()
 
         const bool locked_in = vote_pending_submit;
         ImGui::BeginDisabled(locked_in || !timer_active);
-        for (size_t i = 0; i < kVoteRoles.size(); i++) {
-            // Only offer roles that can actually validate for this run's map - for a Fissure of Woe
-            // duo that's just Ranger/Derv/Nobody (see VoteRoleVisibleForMap); a hidden role is
-            // never checked, so FireVoteSubmit never sends it.
-            if (!VoteRoleVisibleForMap(pending_vote_map_id, i)) {
-                continue;
-            }
-            if (is_mvp) {
-                // MVP credits exactly one role (including "Nobody" as "no standout") - a radio
-                // button group rather than the Failure vote's checkboxes, which can blame several
-                // roles for the same wipe at once.
-                if (ImGui::RadioButton(kVoteRoles[i], vote_role_checked[i])) {
-                    vote_role_checked.fill(false);
-                    vote_role_checked[i] = true;
+        if (pending_vote_has_roles) {
+            for (size_t i = 0; i < kVoteRoles.size(); i++) {
+                // Only offer roles that can actually validate for this run's map - for a Fissure of
+                // Woe duo that's just Ranger/Derv/Nobody (see VoteRoleVisibleForMap); a hidden role
+                // is never checked, so FireVoteSubmit never sends it.
+                if (!VoteRoleVisibleForMap(pending_vote_map_id, i)) {
+                    continue;
                 }
-            }
-            // "Nobody" is mutually exclusive with every other reason: checking it clears the rest,
-            // and checking any other reason clears it.
-            else if (ImGui::Checkbox(kVoteRoles[i], &vote_role_checked[i]) && vote_role_checked[i]) {
-                if (i == kNobodyVoteRoleIndex) {
-                    for (size_t j = 0; j < vote_role_checked.size(); j++) {
-                        if (j != i) {
-                            vote_role_checked[j] = false;
-                        }
+                if (is_mvp) {
+                    // MVP credits exactly one role (including "Nobody" as "no standout") - a radio
+                    // button group rather than the Failure vote's checkboxes, which can blame
+                    // several roles for the same wipe at once.
+                    if (ImGui::RadioButton(kVoteRoles[i], vote_role_checked[i])) {
+                        vote_role_checked.fill(false);
+                        vote_role_checked[i] = true;
                     }
                 }
-                else {
-                    vote_role_checked[kNobodyVoteRoleIndex] = false;
+                // "Nobody" is mutually exclusive with every other reason: checking it clears the
+                // rest, and checking any other reason clears it.
+                else if (ImGui::Checkbox(kVoteRoles[i], &vote_role_checked[i]) && vote_role_checked[i]) {
+                    if (i == kNobodyVoteRoleIndex) {
+                        for (size_t j = 0; j < vote_role_checked.size(); j++) {
+                            if (j != i) {
+                                vote_role_checked[j] = false;
+                            }
+                        }
+                    }
+                    else {
+                        vote_role_checked[kNobodyVoteRoleIndex] = false;
+                    }
                 }
             }
+            if (ImGui::Button("Unselect All")) {
+                vote_role_checked.fill(false);
+            }
         }
-
-        if (ImGui::Button("Unselect All")) {
-            vote_role_checked.fill(false);
+        else {
+            // This run's (map, party_size) config has no role model - credit/blame a specific
+            // character instead. Same radio-vs-checkbox and last-entry-is-"Nobody" mutual-
+            // exclusivity rules as the role-mode branch above, just over pending_vote_names/
+            // vote_name_checked (dynamic size) instead of kVoteRoles/vote_role_checked (fixed 13).
+            // No VoteRoleVisibleForMap filtering here - every captured real player is offered.
+            const size_t nobody_index = pending_vote_names.size() - 1;
+            for (size_t i = 0; i < pending_vote_names.size(); i++) {
+                const char* name = pending_vote_names[i].c_str();
+                if (is_mvp) {
+                    if (ImGui::RadioButton(name, vote_name_checked[i])) {
+                        std::fill(vote_name_checked.begin(), vote_name_checked.end(), false);
+                        vote_name_checked[i] = true;
+                    }
+                }
+                // "Nobody" (the trailing entry) is mutually exclusive with every other name, same
+                // rule as kNobodyVoteRoleIndex in the role-mode branch above.
+                else if (ImGui::Checkbox(name, &vote_name_checked[i]) && vote_name_checked[i]) {
+                    if (i == nobody_index) {
+                        for (size_t j = 0; j < vote_name_checked.size(); j++) {
+                            if (j != i) {
+                                vote_name_checked[j] = false;
+                            }
+                        }
+                    }
+                    else {
+                        vote_name_checked[nobody_index] = false;
+                    }
+                }
+            }
+            if (ImGui::Button("Unselect All")) {
+                std::fill(vote_name_checked.begin(), vote_name_checked.end(), false);
+            }
         }
         ImGui::EndDisabled();
 

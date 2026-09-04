@@ -109,7 +109,11 @@ public:
         // per stone they picked up (quantity-weighted on both sides), summed across the run.
         // std::nullopt (serializes as JSON null) means this member never participated at all -
         // deliberately distinct from a real 0 (e.g. dropped one stone and later picked their own back
-        // up uncontested - a legitimate zero-sum outcome for an actual participant). Both drop and
+        // up uncontested - a legitimate zero-sum outcome for an actual participant). Participation is
+        // signalled by dropping stones on the ground, so a drop is what arms this from nullopt; a
+        // pickup by a member who hasn't dropped this run is ignored (it's loot - most likely a chest
+        // reward that spawned on the floor and was walked over - not a gamble winning, and the pickup
+        // chat message is the same opcode either way). Both drop and
         // pickup are resolved entirely from their own chat message in OnWriteToChatLog (item identity
         // via a raw substring match, exact quantity via an embedded numeric parameter - see
         // MessageContainsGhastlySummoningStone/GetGamblingStoneQuantity in SCTracker.cpp) rather than
@@ -139,8 +143,9 @@ private:
     void OnItemUpdateOwner(uint32_t item_id, uint32_t owner_agent_id);
     // Single choke point for both the drop and pickup sides of the gambling-stone ritual, both
     // resolved entirely from their own chat message - see PartyMember::gambling_stone_net and
-    // OnWriteToChatLog.
-    void AddGamblingStoneDelta(size_t party_index, int32_t delta);
+    // OnWriteToChatLog. is_pickup gates the pickup side: a pickup only counts once the member has
+    // dropped at least once this run (that drop is what signals they're in the gamble).
+    void AddGamblingStoneDelta(size_t party_index, int32_t delta, bool is_pickup);
     void CaptureParty();
     void WriteLogEntry(uint32_t utc_start, uint32_t map_id, const std::string& character_name,
                         const std::string& end_reason, const std::vector<PartyMember>& members);

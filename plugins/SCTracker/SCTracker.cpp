@@ -703,7 +703,7 @@ void SCTracker::OnWriteToChatLog(const wchar_t* message)
                 const auto member_it = gwplayer ? agent_id_to_party_index.find(gwplayer->agent_id)
                                                  : agent_id_to_party_index.end();
                 if (member_it != agent_id_to_party_index.end()) {
-                    AddGamblingStoneDelta(member_it->second, -static_cast<int32_t>(quantity));
+                    AddGamblingStoneDelta(member_it->second, -static_cast<int32_t>(quantity), /*is_pickup=*/false);
                 }
                 return;
             }
@@ -715,7 +715,7 @@ void SCTracker::OnWriteToChatLog(const wchar_t* message)
             }
             const auto member_it = agent_id_to_party_index.find(GW::Agents::GetControlledCharacterId());
             if (member_it != agent_id_to_party_index.end()) {
-                AddGamblingStoneDelta(member_it->second, -static_cast<int32_t>(GetGamblingStoneQuantity(message)));
+                AddGamblingStoneDelta(member_it->second, -static_cast<int32_t>(GetGamblingStoneQuantity(message)), /*is_pickup=*/false);
             }
             break;
         }
@@ -741,7 +741,7 @@ void SCTracker::OnWriteToChatLog(const wchar_t* message)
                 const auto member_it = gwplayer ? agent_id_to_party_index.find(gwplayer->agent_id)
                                                  : agent_id_to_party_index.end();
                 if (member_it != agent_id_to_party_index.end()) {
-                    AddGamblingStoneDelta(member_it->second, static_cast<int32_t>(quantity));
+                    AddGamblingStoneDelta(member_it->second, static_cast<int32_t>(quantity), /*is_pickup=*/true);
                 }
                 return;
             }
@@ -753,7 +753,7 @@ void SCTracker::OnWriteToChatLog(const wchar_t* message)
             }
             const auto member_it = agent_id_to_party_index.find(GW::Agents::GetControlledCharacterId());
             if (member_it != agent_id_to_party_index.end()) {
-                AddGamblingStoneDelta(member_it->second, static_cast<int32_t>(GetGamblingStoneQuantity(message)));
+                AddGamblingStoneDelta(member_it->second, static_cast<int32_t>(GetGamblingStoneQuantity(message)), /*is_pickup=*/true);
             }
             break;
         }
@@ -971,16 +971,25 @@ void SCTracker::OnItemUpdateOwner(const uint32_t item_id, const uint32_t owner_a
 }
 
 // Single choke point for both the drop (OnWriteToChatLog, negative delta) and pickup
-// (OnItemUpdateOwner, positive delta) paths - initializes gambling_stone_net from null to 0 on a
-// member's first gambling event of the run (see the field's own comment for the null/0 distinction),
-// then applies delta (already sign-adjusted and quantity-weighted by the caller - see
-// OnWriteToChatLog, the sole caller for both drop and pickup). Guards on is_player here rather than at
-// each call site - heroes/henchmen are reachable via agent_id_to_party_index (it indexes every party
-// member) but can never actually perform the ritual.
-void SCTracker::AddGamblingStoneDelta(const size_t party_index, const int32_t delta)
+// (OnWriteToChatLog, positive delta) paths - a drop initializes gambling_stone_net from null to 0
+// (see the field's own comment for the null/0 distinction), then applies delta (already sign-adjusted
+// and quantity-weighted by the caller). Guards on is_player here rather than at each call site -
+// heroes/henchmen are reachable via agent_id_to_party_index (it indexes every party member) but can
+// never actually perform the ritual.
+//
+// is_pickup gates the pickup side against loot that isn't a gamble winning: opening a chest spawns
+// the reward on the floor, and walking over it emits the exact same "picks up item" opcode this
+// parser credits. Participation in the gamble is signalled by dropping stones on the ground, so a
+// pickup only counts once this member has already dropped at least once this run (gambling_stone_net
+// is non-null). A pickup by a member who never dropped is left uncounted - and, crucially, doesn't
+// arm the counter either, so it stays null ("didn't gamble") rather than becoming a spurious 0/+N.
+void SCTracker::AddGamblingStoneDelta(const size_t party_index, const int32_t delta, const bool is_pickup)
 {
     PartyMember& member = party_members[party_index];
     if (!member.is_player) {
+        return;
+    }
+    if (is_pickup && !member.gambling_stone_net.has_value()) {
         return;
     }
     member.gambling_stone_net = member.gambling_stone_net.value_or(0) + delta;

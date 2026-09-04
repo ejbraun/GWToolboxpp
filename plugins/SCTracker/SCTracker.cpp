@@ -112,6 +112,12 @@ struct PluginVersionResponseDto {
 
 namespace {
     constexpr const char* kBaseUrl = "https://gwsctracker.com";
+    // Multi-use signup invite shown in DrawSettings so a new user can self-serve an account instead
+    // of asking an admin for a one-off key. It's a gwsctracker "signup link" (currently capped at
+    // 100 signups); once it's used up, mint a fresh one on the site (admin -> Signup Links) and
+    // ship the new URL in a plugin release.
+    constexpr const char* kSignupInviteUrl =
+        "https://gwsctracker.com/signup?invite=Wgedvi8kwXD3_V5vpd1R1SUxdc-udO7OQz5BeWgJv7w";
     constexpr const char* kUploadRunsPath = "upload-run";
     constexpr const char* kReportFailurePath = "report-run-failure";
     constexpr const char* kReportMvpPath = "report-run-mvp";
@@ -1838,6 +1844,14 @@ void SCTracker::DrawSettings()
     if (ImGui::InputText("Machine Key", machine_key_buf, sizeof(machine_key_buf), ImGuiInputTextFlags_Password)) {
         machine_key = machine_key_buf;
     }
+
+    ImGui::TextUnformatted("Website:");
+    ImGui::SameLine();
+    ImGui::TextLinkOpenURL("gwsctracker.com", kBaseUrl);
+    ImGui::TextUnformatted("New to the plugin?");
+    ImGui::SameLine();
+    ImGui::TextLinkOpenURL("Sign up", kSignupInviteUrl);
+
     ImGui::Text("Sync: %s", pending_sync ? "1 pending" : "idle");
     if (last_persisted_utc_start) {
         std::string time_str;

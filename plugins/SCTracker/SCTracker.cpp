@@ -157,41 +157,54 @@ namespace {
 
     // Instances GWToolboxdll's ObjectiveTimerWindow tracks AND the backend accepts (map_configs).
     // Re-expand from ObjectiveTimerWindow::AddObjectiveSet()'s switch (more elite areas, dungeons,
-    // ToPK) as the backend gains map_configs rows for them.
+    // ToPK) as the backend gains map_configs rows for them. Domain of Anguish is tracked via a
+    // separate ObjectiveTimerWindow path (AddDoAObjectiveSet, gated on InstanceLoadFile's
+    // map_fileID, not the map_id switch) because its map_id is shared with the solo Ebony Citadel
+    // of Mallyx challenge - the IsAcceptablePartySize 8-man gate rejects that 1-player instance.
     const std::unordered_set<uint32_t> kTrackedMapIds = {
         static_cast<uint32_t>(GW::Constants::MapID::The_Underworld),
         static_cast<uint32_t>(GW::Constants::MapID::The_Fissure_of_Woe),
+        static_cast<uint32_t>(GW::Constants::MapID::Domain_of_Anguish),
     };
 
     // Whether the backend has a map_configs row for this (tracked map, real-player count): the
-    // Underworld is 8-man; the Fissure of Woe has a config for every party size 1-8. A run whose
-    // CountRealPlayers matches no config is never published and never opens a vote (ProcessSync).
+    // Underworld and Domain of Anguish are 8-man; the Fissure of Woe has a config for every party
+    // size 1-8. A run whose CountRealPlayers matches no config is never published and never opens a
+    // vote (ProcessSync).
     bool IsAcceptablePartySize(const uint32_t map_id, const uint32_t real_player_count)
     {
         switch (static_cast<GW::Constants::MapID>(map_id)) {
             case GW::Constants::MapID::The_Fissure_of_Woe:
                 return real_player_count >= 1 && real_player_count <= 8;
-            default: // The_Underworld and any future 8-man-only tracked area
+            // Domain_of_Anguish is 8-man only - the == 8 check below also rejects the solo Ebony
+            // Citadel of Mallyx challenge, which runs on the same map_id with 1 real player.
+            default: // The_Underworld, Domain_of_Anguish, and any future 8-man-only tracked area
                 return real_player_count == 8;
         }
     }
 
     // Whether a (map, real-player count) run has a role model at all. The Underworld trapper team
-    // and the Fissure of Woe *duo* do (T1-T3 / Ranger-Derv); every other FoW size has no fixed
-    // composition (map_configs.role_model = NULL), so those runs get no post-run failure/MVP vote
-    // - there are no roles to blame or credit. Keep in sync with the backend's map_configs.
+    // and the Fissure of Woe *duo* do (T1-T3 / Ranger-Derv); every other FoW size and all of
+    // Domain of Anguish have no fixed composition (map_configs.role_model = NULL), so those runs
+    // get no post-run failure/MVP vote - there are no roles to blame or credit. Keep in sync with
+    // the backend's map_configs.
     bool MapSizeHasRoles(const uint32_t map_id, const uint32_t real_player_count)
     {
-        if (static_cast<GW::Constants::MapID>(map_id) == GW::Constants::MapID::The_Fissure_of_Woe) {
-            return real_player_count == 2;
+        switch (static_cast<GW::Constants::MapID>(map_id)) {
+            case GW::Constants::MapID::The_Underworld:
+                return true;
+            case GW::Constants::MapID::The_Fissure_of_Woe:
+                return real_player_count == 2;
+            default: // Domain of Anguish and any future role-less tracked area
+                return false;
         }
-        return true; // The_Underworld
     }
 
     // Whether this map's run mechanics revolve around the UW Dhuum fight. Gates the death-cutoff
     // latch (dhuum_started), the post-Dhuum gambling ritual, and the dhuum_completed end-reason
-    // shortcut - none of which have a Fissure of Woe analogue. FoW run completion falls back to
-    // ProcessSync's map-agnostic IsRunCompleted (objectives.back().status == Completed).
+    // shortcut - none of which have a Fissure of Woe or Domain of Anguish analogue. Those runs'
+    // completion falls back to ProcessSync's map-agnostic IsRunCompleted
+    // (objectives.back().status == Completed).
     bool MapHasDhuumMechanics(const uint32_t map_id)
     {
         return static_cast<GW::Constants::MapID>(map_id) == GW::Constants::MapID::The_Underworld;
@@ -1332,9 +1345,9 @@ void SCTracker::ProcessSync()
     // Resolving a disqualified entry immediately searches for the next oldest one via
     // FindNextPendingEntry(), so several already-known-disqualified runs still drain within one
     // ProcessSync() tick instead of one per scan interval. Only a real-player party matching one of
-    // the map's backend map_configs sizes is meaningful for the leaderboard (8 for the Underworld,
-    // any of 1-8 for the Fissure of Woe - IsAcceptablePartySize; note heroes/henchmen never count
-    // toward the real-player total), and a run with no matching GWToolboxdll
+    // the map's backend map_configs sizes is meaningful for the leaderboard (8 for the Underworld
+    // and Domain of Anguish, any of 1-8 for the Fissure of Woe - IsAcceptablePartySize; note
+    // heroes/henchmen never count toward the real-player total), and a run with no matching GWToolboxdll
     // objective entry can never be leaderboard-eligible anyway. Both cases mark the entry synced
     // instead of retrying it forever - which also cancels any pending vote (CancelPendingVoteIfMatching).
     bool advanced_watermark = false;

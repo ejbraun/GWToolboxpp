@@ -126,9 +126,11 @@ private:
     // Only tracks instances GWToolboxdll's own ObjectiveTimerWindow would create an ObjectiveSet for
     // (see kTrackedMapIds) - skips capture/hooks entirely for everything else (random missions,
     // vanquishes, etc.), so ProcessSync never has to hold/wait out an entry that can never find a
-    // matching objective log. DoA is deliberately excluded: it's not in ObjectiveTimerWindow's map_id switch at
-    // all (it's gated on a different packet's map_fileID, since DoA shares its map_id with the solo
-    // Mallyx mission) - out of scope here per explicit instruction.
+    // matching objective log. Domain of Anguish is included even though it's not in
+    // ObjectiveTimerWindow's map_id switch: that window builds a DoA ObjectiveSet from a separate
+    // path (AddDoAObjectiveSet, gated on InstanceLoadFile's map_fileID, since DoA shares its map_id
+    // with the solo Mallyx challenge), so a matching objective log does get written. The
+    // IsAcceptablePartySize 8-man gate rejects the 1-player Mallyx instance.
     void OnInstanceLoadInfo(uint32_t map_id, bool is_explorable);
     void OnGameSrvTransfer();
     void OnPartyDefeated();

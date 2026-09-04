@@ -146,7 +146,9 @@ jobs:
     # asset each. Plugin names come straight from add_tb_plugin() so a new plugin
     # is picked up automatically; ExamplePlugin is excluded (sample; also
     # -DGWTOOLBOX_BUILD_EXAMPLE_PLUGIN=OFF in CI). Guarded off upstream, which
-    # ships no third-party plugins.
+    # ships no third-party plugins. Also stages each plugin's optional
+    # plugins/<Name>/<Name>.patch.txt straight from source (not a build output,
+    # so it's not under bin/) - see AGENTS.md's "Plugin version bumps" entry.
     - name: Stage plugin artifacts
       if: github.ref == 'refs/heads/master' && github.repository != 'gwdevhub/GWToolboxpp'
       shell: pwsh
@@ -164,6 +166,8 @@ jobs:
           $files = Get-ChildItem "$bin/$p.*" -File -ErrorAction SilentlyContinue
           if (-not $files) { Write-Warning "no build output for plugin $p"; continue }
           $files | Copy-Item -Destination $staging
+          $patchNotes = "plugins/$p/$p.patch.txt"
+          if (Test-Path $patchNotes) { Copy-Item $patchNotes -Destination $staging }
         }
         Get-ChildItem $staging | Format-Table Name, Length -AutoSize
 
@@ -242,6 +246,13 @@ jobs:
           if [ -f "staging/plugins/$name.version.json" ]; then
             gcloud storage cp "staging/plugins/$name.version.json" \
               "gs://$BUCKET/plugins/$name/$name.version.json" --cache-control=no-cache
+          fi
+          # Optional patch notes (see AGENTS.md's "Plugin version bumps" entry) - CI only ever
+          # overwrites this object with whatever's currently in the source tree; the append-only
+          # accumulation happens in the git history, not here.
+          if [ -f "staging/plugins/$name.patch.txt" ]; then
+            gcloud storage cp "staging/plugins/$name.patch.txt" \
+              "gs://$BUCKET/plugins/$name/$name.patch.txt" --cache-control=no-cache
           fi
           published=$((published + 1))
         done

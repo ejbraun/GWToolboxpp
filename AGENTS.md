@@ -9,3 +9,9 @@ Instructions for any AI agent in this repo. (`CLAUDE.md` just imports this.)
 - **Reuse:** before adding a string/formatting or ImGui/dialog helper, check `Utils/TextUtils.h` and `Utils/GuiUtils.h` - there's often one already.
 - **Docs (`site/`):** pages go in `src/content/docs/`; `llms.txt`/`llms-full.txt` auto-generate from them. A new page needs `description:` frontmatter plus a `src/lib/nav.ts` entry to appear in `llms.txt`. After changes run `npm --prefix site run build` and check `site/dist/llms.txt`.
 - **Explaining a feature:** first check if it's documented (`src/content/docs/` or <https://www.gwtoolbox.com/docs/>); if missing/wrong, flag it, offer a fix, and link the page.
+- **Plugin version bumps → patch notes:** whenever you bump a plugin's protocol version constant (e.g. `SCTRACKER_PLUGIN_VERSION` in `cmake/gwtoolboxdll_plugins.cmake`), append an entry to that plugin's `plugins/<Name>/<Name>.patch.txt` in the same commit (create the file if it doesn't exist yet). Standard format, appended at the end of the file (oldest first - never rewrite or reorder prior entries):
+  ```
+  ## v<N> - YYYY-MM-DD
+  - What changed, one bullet per notable change.
+  ```
+  `.github/workflows/cmake.yml` publishes this file to the bucket alongside the dll/manifest on every `master` build; gwsctracker registers it as that module's `patch_notes_object` and serves it at `GET /modules/{key}/patch-notes` (see gwsctracker's `specs/backend/08-module-entitlements.md`). The file is optional - a plugin with no version constant to bump has nothing to append.

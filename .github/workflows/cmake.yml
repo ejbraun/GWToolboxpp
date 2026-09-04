@@ -247,6 +247,26 @@ jobs:
         done
         echo "published $published plugin(s) to gs://$BUCKET/plugins/"
 
+        # Also serve the toolbox dll itself. gwsctracker hosts it at plugins/GWToolboxdll/
+        # (registered under module key `gwtoolbox`); GW Launcher Reforged pulls this build.
+        # It's not an add_tb_plugin() target so "Stage plugin artifacts" skips it and there's
+        # no cmake POST_BUILD manifest - generate one here with the same writer the plugins
+        # use. No VERSION arg: GWToolboxdll has only a string version, so the manifest carries
+        # just name/compiled_at/sha256 (the backend then reports version 0 for it).
+        TB_DLL="${{runner.workspace}}/GWToolboxpp/bin/RelWithDebInfo/GWToolboxdll.dll"
+        if [ -f "$TB_DLL" ]; then
+          cmake -DNAME=GWToolboxdll -DDLL="$TB_DLL" \
+                -DOUTPUT="GWToolboxdll.version.json" \
+                -P plugins/Base/write-plugin-manifest.cmake
+          gcloud storage cp "$TB_DLL" \
+            "gs://$BUCKET/plugins/GWToolboxdll/GWToolboxdll.dll" --cache-control=no-cache
+          gcloud storage cp "GWToolboxdll.version.json" \
+            "gs://$BUCKET/plugins/GWToolboxdll/GWToolboxdll.version.json" --cache-control=no-cache
+          echo "published GWToolboxdll to gs://$BUCKET/plugins/GWToolboxdll/"
+        else
+          echo "GWToolboxdll.dll not found at $TB_DLL; skipping toolbox publish"
+        fi
+
     - name: Create release
       if: steps.version.outputs.should_release == 'true'
       shell: bash

@@ -165,10 +165,10 @@ void TacticalMinimap::Draw(IDirect3DDevice9*)
     hovered_ = false;
     if (!active_ || stopping_ || !*GetVisiblePtr()) return;
     const auto mode = Tactical::ResolveInput(tactical_, Held(map_modifier_), Held(target_modifier_));
-    const auto interactive = mode != Tactical::Input::Passthrough && opacity_ > 0
+    const auto interactive = ((mode != Tactical::Input::Passthrough && opacity_ > 0) || !lock_move)
         && !ImGui::GetIO().WantTextInput && !ImGui::IsMouseDown(ImGuiMouseButton_Right);
     auto flags = GetWinFlags(ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoFocusOnAppearing);
-    if (!interactive) flags |= ImGuiWindowFlags_NoInputs;
+    if (!interactive && lock_size) flags |= ImGuiWindowFlags_NoInputs;
     ImGui::SetNextWindowSize(ImVec2(320.f, 320.f), ImGuiCond_FirstUseEver);
     if (reset_position_) {
         ImGui::SetNextWindowPos(ImVec2(80.f, 120.f));
@@ -328,7 +328,7 @@ void TacticalMinimap::DrawSettings()
     ImGui::Combo("Pan map (during map interaction)", &drag_modifier_, modifiers, 4);
     ImGui::Combo("Move character (during map interaction)", &move_modifier_, modifiers, 4);
     ImGui::TextWrapped("Tactical mode passes mouse clicks through until a modifier is held. Targeting wins when both modifiers are held. Hold the map modifier to ping, draw or zoom; add the pan modifier to drag the view. Double-click with the pan modifier to recenter. None disables a modifier action.");
-    ImGui::TextWrapped("Unlock movement or resizing above, then hold the map modifier to reposition this window. These settings apply only to the DBBox Tactical Minimap.");
+    ImGui::TextWrapped("Unlock movement or resizing above to reposition or resize this window without holding a modifier. These settings apply only to the DBBox Tactical Minimap.");
     if (ImGui::Button("Recenter")) pan_ = {};
     ImGui::SameLine();
     if (ImGui::Button("Reset window position")) reset_position_ = true;

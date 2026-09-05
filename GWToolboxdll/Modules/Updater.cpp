@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include <ForkVersion.h>
 
 #include <Utils/GuiUtils.h>
 #include <GWToolbox.h>
@@ -300,6 +301,9 @@ void Updater::SaveSettings(SettingsDoc& doc)
 
 void Updater::DrawSettingsInternal()
 {
+#ifdef GWRL_MANAGED_UPDATES
+    ImGui::TextWrapped("Downloads and updates are managed by GWRLauncher. Open the GWRL settings section to view pending updates.");
+#else
     ImGui::Text("Release channel:");
     const float btnWidth = 180.0f * ImGui::FontScale();
     ImGui::SameLine(ImGui::GetContentRegionAvail().x - btnWidth);
@@ -313,10 +317,16 @@ void Updater::DrawSettingsInternal()
     ImGui::RadioButton("Check and display a message", (int*)&settings.update_mode, static_cast<int>(Mode::CheckAndWarn));
     ImGui::RadioButton("Check and ask before updating", (int*)&settings.update_mode, static_cast<int>(Mode::CheckAndAsk));
     ImGui::RadioButton("Check and automatically update", (int*)&settings.update_mode, static_cast<int>(Mode::CheckAndAutoUpdate));
+#endif
 }
 
 void Updater::CheckForUpdate(const bool forced)
 {
+#ifdef GWRL_MANAGED_UPDATES
+    static_cast<void>(forced);
+    GetCurrentVersionInfo(&current_release);
+    step = Done;
+#else
     if (!GetCurrentVersionInfo(&current_release)) {
         Log::Error("Failed to get current toolbox version info");
     }
@@ -364,6 +374,7 @@ void Updater::CheckForUpdate(const bool forced)
                 break;
         }
     });
+#endif
 }
 
 bool Updater::IsLatestVersion()

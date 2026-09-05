@@ -71,7 +71,7 @@ This error typically means that some security feature is preventing Toolbox to a
 Please follow each of the steps below before asking for help. If something is still not working, do not hesitate to ask for help — but please provide accurate problem descriptions, how you can reproduce them, and post full error messages.
 
 1. Re-download the exe from [https://gwtoolbox.com/](https://gwtoolbox.com/) and run it to make sure you have the latest version.
-2. **Do not use any Toolbox plugins or other mods** — disable them and test again.
+2. **Record the loaded plugins and DBBox features.** Disable features individually if needed to isolate a fault.
 3. Try launching the game without GW Launcher/Daybreak.
 4. Make sure you are running the latest version. Older Toolbox versions are **not supported**.
 5. Toolbox only works in PvE areas. The Guild Hall is a PvP area and Toolbox will not load there.
@@ -90,12 +90,12 @@ When Toolbox crashes it writes a **crash dump** — a `.dmp` file — that the d
 
 1. Open a File Explorer window, paste `%USERPROFILE%\Documents\GWToolboxpp` into the address bar, and press enter.
 2. Open the folder named after your computer, then open the **`crashes`** folder.
-3. Find the most recent `.dmp` file (sorted by date), **zip it up**, and attach it either to a [new issue on the bug tracker](https://github.com/gwdevhub/GWToolboxpp/issues) or to a developer on Discord.
+3. Find the most recent `.dmp` file (sorted by date), **zip it up**, and share it manually through the fork maintainer's agreed private reporting channel.
 4. Please also describe what you were doing in game when it crashed, and confirm which Toolbox version you were running.
 
 **Note:** the `GWToolbox.error.log` file that sits next to `GWToolbox.exe` is **not** the crash dump — it is the launcher's log and is usually 0 KB, which is normal. The file the team needs is the `.dmp` in the `crashes` folder above.
 
-If there is no recent `.dmp` file, Toolbox skipped creating one on purpose. In a crash, Toolbox will **not** write a dump if you are running an outdated version or have plugins loaded — update to the latest version from [gwtoolbox.com](https://gwtoolbox.com/) and disable plugins, then reproduce the crash to get a usable dump.
+This fork attempts to write dumps with plugins loaded and on older versions. If no recent `.dmp` exists, check the crash popup and [crash dump troubleshooting](/docs/troubleshooting/#crash-dump-errors); a file-system or crash-handler failure may have prevented writing it. Dumps include cached plugin/build and GWRL transaction diagnostics.
 
 ## In-game issues and how-to
 

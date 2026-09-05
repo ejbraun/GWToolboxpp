@@ -76,3 +76,6 @@ GWToolbox.aps
 # VSCode stuff
 .vscode/
 .aider*
+
+/build-gwrl-tests/
+/tests/

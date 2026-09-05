@@ -61,12 +61,25 @@ macro(add_tb_plugin PLUGIN)
     if(${ARGC} GREATER 1)
         set(_tb_plugin_version "${ARGV1}")
     endif()
+    set(_tb_manifest_extra)
+    if("${PLUGIN}" STREQUAL "DBBox")
+        set(_tb_artifact_name "${PLUGIN}")
+        set(_tb_manifest_extra -DABI=${GWTOOLBOX_PLUGIN_ABI} -DBUILD_ID=${GWTOOLBOX_FORK_BUILD_ID})
+        math(EXPR _tb_version_high "${_tb_plugin_version} >> 16")
+        math(EXPR _tb_version_low "${_tb_plugin_version} & 65535")
+        configure_file("${PROJECT_SOURCE_DIR}/plugins/Base/ArtifactVersion.generated.h.in"
+            "${CMAKE_BINARY_DIR}/generated/${PLUGIN}/ArtifactVersion.generated.h" @ONLY)
+        target_include_directories(${PLUGIN} PRIVATE "${CMAKE_BINARY_DIR}/generated/${PLUGIN}")
+        target_sources(${PLUGIN} PRIVATE "${PROJECT_SOURCE_DIR}/plugins/Base/ArtifactMetadata.cpp"
+            "${PROJECT_SOURCE_DIR}/plugins/Base/ArtifactVersion.rc")
+    endif()
     add_custom_command(TARGET ${PLUGIN} POST_BUILD
         COMMAND ${CMAKE_COMMAND}
                 -DNAME=${PLUGIN}
                 -DDLL=$<TARGET_FILE:${PLUGIN}>
                 -DOUTPUT=$<TARGET_FILE_DIR:${PLUGIN}>/${PLUGIN}.version.json
                 -DVERSION=${_tb_plugin_version}
+                ${_tb_manifest_extra}
                 -P "${PROJECT_SOURCE_DIR}/plugins/Base/write-plugin-manifest.cmake"
         COMMENT "Writing ${PLUGIN}.version.json"
         VERBATIM)
@@ -77,7 +90,7 @@ if(GWTOOLBOX_BUILD_EXAMPLE_PLUGIN)
     add_tb_plugin(ExamplePlugin)
 endif()
 
-add_tb_plugin(DBBox)
+add_tb_plugin(DBBox ${DBBOX_PLUGIN_VERSION})
 
 set(DBBOX_FEATURES
     AgentPopTimer
@@ -96,6 +109,7 @@ set(DBBOX_FEATURES
     Slowload
     SpeedrunScriptingTools
     TargetDetector
+    TacticalMinimap
     TrackerAdvanced)
 
 set(DBBOX_SOURCES

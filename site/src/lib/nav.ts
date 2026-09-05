@@ -79,6 +79,10 @@ export const navGroups: NavGroup[] = [
       { slug: 'input_modules', label: 'Input' },
       { slug: 'qol_fixes', label: 'Quality of Life Fixes' },
       { slug: 'plugins', label: 'Plugins' },
+      { slug: 'tactical_minimap', label: 'DBBox Tactical Minimap' },
+      { slug: 'gwrl', label: 'GWRL Updates' },
+      { slug: 'gwrl_protocol', label: 'GWRL Protocol' },
+      { slug: 'fork_releases', label: 'Fork Releases' },
     ],
   },
 ];

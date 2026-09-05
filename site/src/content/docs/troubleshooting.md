@@ -12,8 +12,8 @@ If you are not sure which section you need, the error message Toolbox showed you
 
 Work through these first — they resolve the majority of issues:
 
-1. **Update to the latest version.** Re-download `GWToolbox.exe` from [gwtoolbox.com](https://gwtoolbox.com/) and run it. Old versions are not supported.
-2. **Disable plugins and other mods** and test again. Toolbox will not write a crash dump while plugins are loaded.
+1. **Check for a supported fork build in GWRLauncher.** See [GWRL updates](/docs/gwrl/). Older builds can still produce crash dumps.
+2. **Record loaded plugins and DBBox features.** This fork writes dumps with plugins loaded; disabling individual features can help isolate a fault.
 3. **Launch Guild Wars in windowed mode**, not minimized or fullscreen, before starting Toolbox.
 4. **Run as administrator** if Guild Wars itself is running as administrator (for example when started by a launcher).
 5. **Avoid other programs that hook Guild Wars** at the same time (TexMod, uMod, multi-client launchers, screen/game overlays).

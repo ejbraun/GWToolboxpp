@@ -13,6 +13,8 @@ on:
       - '**/*.cpp'
       - '**/*.c'
       - '**/*.h'
+      - '**/*.h.in'
+      - '**/*.patch.txt'
       # Win32 resources
       - '**/*.rc'
       - '**/*.ico'
@@ -20,6 +22,7 @@ on:
       # Build system
       - 'CMakeLists.txt'
       - 'cmake/*.cmake'
+      - 'plugins/Base/write-plugin-manifest.cmake'
       - 'CMakePresets.json'
       - 'CMakeSettings.json'
       - 'vcpkg.json'
@@ -27,6 +30,7 @@ on:
       - 'vcpkg-overlays/**'
       # The workflow itself
       - '.github/workflows/cmake.yml'
+      - '!tests/**'
   pull_request:
     branches:
       - dev
@@ -53,11 +57,11 @@ jobs:
       GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
 
     steps:
+
 #    - name: Setup Windows 10 SDK Action
 #      uses: GuillaumeFalourd/setup-windows10-sdk-action@v2
 #      with:
 #        sdk-version: 22621
-
     - name: Checkout repository
       uses: actions/checkout@v4
 
@@ -133,15 +137,16 @@ jobs:
     - name: Save output
       uses: actions/upload-artifact@v4
       with:
-        # GWToolboxdll.pdb.gz (compress.ps1, GWToolboxdll/CMakeLists.txt POST_BUILD) already carries the
-        # debug info the raw .pdb has - excluded so the artifact doesn't ship both.
+        # GWToolboxdll.pdb.gz (compress.ps1, GWToolboxdll/CMakeLists.txt POST_BUILD) carries the
+        # same debug info as the raw .pdb. Both forms stay local and are excluded from uploads.
         path: |
           ${{runner.workspace}}/GWToolboxpp/bin/RelWithDebInfo/*
-          !${{runner.workspace}}/GWToolboxpp/bin/RelWithDebInfo/GWToolboxdll.pdb
+          !${{runner.workspace}}/GWToolboxpp/bin/RelWithDebInfo/**/*.pdb
+          !${{runner.workspace}}/GWToolboxpp/bin/RelWithDebInfo/**/*.pdb.gz
 
     # --- fork-only: third-party plugin artifacts --------------------------------
-    # Every file the plugin build drops into bin/ for a plugin target (DLL, PDB,
-    # and the SCTracker.version.json sidecar from cmake/gwtoolboxdll_plugins.cmake's
+    # Every publishable file the plugin build drops into bin/ (DLL and generated
+    # .version.json sidecar from cmake/gwtoolboxdll_plugins.cmake's
     # POST_BUILD) is staged for the release uncompressed - one loose, top-level
     # asset each. Plugin names come straight from add_tb_plugin() so a new plugin
     # is picked up automatically; ExamplePlugin is excluded (sample; also
@@ -149,6 +154,7 @@ jobs:
     # ships no third-party plugins. Also stages each plugin's optional
     # plugins/<Name>/<Name>.patch.txt straight from source (not a build output,
     # so it's not under bin/) - see AGENTS.md's "Plugin version bumps" entry.
+    # Raw and compressed PDBs stay local and are excluded from staging.
     - name: Stage plugin artifacts
       if: github.ref == 'refs/heads/master' && github.repository != 'gwdevhub/GWToolboxpp'
       shell: pwsh
@@ -163,7 +169,8 @@ jobs:
           Where-Object { $_ -ne 'ExamplePlugin' } | Select-Object -Unique
         if (-not $plugins) { Write-Host 'no plugins to stage'; exit 0 }
         foreach ($p in $plugins) {
-          $files = Get-ChildItem "$bin/$p.*" -File -ErrorAction SilentlyContinue
+          $files = Get-ChildItem "$bin/$p.*" -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notmatch '(?i)\.pdb(?:\.gz)?$' }
           if (-not $files) { Write-Warning "no build output for plugin $p"; continue }
           $files | Copy-Item -Destination $staging
           $patchNotes = "plugins/$p/$p.patch.txt"
@@ -173,42 +180,23 @@ jobs:
 
     - name: Determine release version
       id: version
-      if: github.ref == 'refs/heads/master'
-      shell: bash
+      if: github.ref == 'refs/heads/master' && github.repository != 'gwdevhub/GWToolboxpp'
+      shell: pwsh
       run: |
-        VERSION=$(sed -n 's/.*set(GWTOOLBOXDLL_VERSION "\(.*\)").*/\1/p' CMakeLists.txt | tr -d '\r')
-        BETA=$(sed -n 's/.*set(GWTOOLBOXDLL_VERSION_BETA "\(.*\)").*/\1/p' CMakeLists.txt | tr -d '\r')
-
-        if [ -z "$VERSION" ]; then
-          echo "Could not find version in CMakeLists.txt"
-          exit 1
-        fi
-
-        if [ -z "$BETA" ]; then
-          TAG_NAME="${VERSION}_Release"
-        else
-          TAG_NAME="${VERSION}_${BETA}"
-        fi
-
-        echo "Detected version: $VERSION"
-        echo "Detected beta: $BETA"
-        echo "Target tag: $TAG_NAME"
-        echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
-        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-        if git ls-remote --tags origin "refs/tags/$TAG_NAME" | grep -q .; then
-          echo "Tag $TAG_NAME already exists. Skipping release."
-          echo "should_release=false" >> "$GITHUB_OUTPUT"
-        else
-          echo "Tag $TAG_NAME does not exist. Will create release."
-          echo "should_release=true" >> "$GITHUB_OUTPUT"
-        fi
+        $manifest = Get-Content -LiteralPath "${{runner.workspace}}/GWToolboxpp/bin/RelWithDebInfo/GWToolboxdll.version.json" -Raw | ConvertFrom-Json
+        $tag = "gwtoolbox-v$($manifest.display_version)"
+        "tag_name=$tag" >> $env:GITHUB_OUTPUT
+        "version=$($manifest.display_version)" >> $env:GITHUB_OUTPUT
+        $existing = git ls-remote --tags origin "refs/tags/$tag"
+        if ($LASTEXITCODE -ne 0) { throw 'Could not query release tags' }
+        $shouldRelease = [string]::IsNullOrWhiteSpace(($existing -join "`n")).ToString().ToLowerInvariant()
+        "should_release=$shouldRelease" >> $env:GITHUB_OUTPUT
+        Write-Host "Target tag: $tag; create release: $shouldRelease"
 
     # Upstream signs GWToolbox.exe / GWToolboxdll.dll / the plugin DLLs in place
     # here with a Certum SimplySign cert, then regenerates each plugin manifest's
     # sha256 post-sign. This fork has no signing secrets, so it ships everything
     # unsigned and those steps are omitted entirely.
-
     # --- fork-only: publish every plugin to the backend's private GCS bucket ----
     # The gwsctracker backend fetches each plugin's <Name>.dll + <Name>.version.json
     # from gs://<bucket>/plugins/<Name>/ at runtime instead of bundling them, so a
@@ -260,19 +248,19 @@ jobs:
 
         # Also serve the toolbox dll itself. gwsctracker hosts it at plugins/GWToolboxdll/
         # (registered under module key `gwtoolbox`); GW Launcher Reforged pulls this build.
-        # It's not an add_tb_plugin() target so "Stage plugin artifacts" skips it and there's
-        # no cmake POST_BUILD manifest - generate one here with the same writer the plugins
-        # use. No VERSION arg: GWToolboxdll has only a string version, so the manifest carries
-        # just name/compiled_at/sha256 (the backend then reports version 0 for it).
+        # It is not an add_tb_plugin() target, so "Stage plugin artifacts" skips it. Its
+        # CMake POST_BUILD now uses the shared manifest writer with the integer fork
+        # revision, upstream/fork display version, ABI and build ID. Publish that
+        # generated manifest and the cumulative fork patch notes alongside the DLL.
         TB_DLL="${{runner.workspace}}/GWToolboxpp/bin/RelWithDebInfo/GWToolboxdll.dll"
         if [ -f "$TB_DLL" ]; then
-          cmake -DNAME=GWToolboxdll -DDLL="$TB_DLL" \
-                -DOUTPUT="GWToolboxdll.version.json" \
-                -P plugins/Base/write-plugin-manifest.cmake
+          TB_MANIFEST="${TB_DLL%.dll}.version.json"
           gcloud storage cp "$TB_DLL" \
             "gs://$BUCKET/plugins/GWToolboxdll/GWToolboxdll.dll" --cache-control=no-cache
-          gcloud storage cp "GWToolboxdll.version.json" \
+          gcloud storage cp "$TB_MANIFEST" \
             "gs://$BUCKET/plugins/GWToolboxdll/GWToolboxdll.version.json" --cache-control=no-cache
+          gcloud storage cp "GWToolboxdll/GWToolboxdll.patch.txt" \
+            "gs://$BUCKET/plugins/GWToolboxdll/GWToolboxdll.patch.txt" --cache-control=no-cache
           echo "published GWToolboxdll to gs://$BUCKET/plugins/GWToolboxdll/"
         else
           echo "GWToolboxdll.dll not found at $TB_DLL; skipping toolbox publish"
@@ -285,24 +273,16 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         TAG_NAME="${{ steps.version.outputs.tag_name }}"
-        VERSION="${{ steps.version.outputs.version }}"
+        # compress.ps1 (GWToolboxdll/CMakeLists.txt POST_BUILD) already prepares the compressed
+        # PDB; no re-gzip is needed. Raw and compressed symbols stay local and are not release assets.
         BIN_DIR="${{runner.workspace}}/GWToolboxpp/bin/RelWithDebInfo"
 
-        # Already built by compress.ps1 (GWToolboxdll/CMakeLists.txt POST_BUILD) - no need to re-gzip.
-        cp "$BIN_DIR/GWToolboxdll.pdb.gz" GWToolboxdll.pdb.gz
-
-        # Pull this version's patch notes from history.md for the release body. Exact heading
-        # match so "8.3" can't grab "8.30"; stop at the next version heading. Fall back to a
-        # non-empty placeholder so the Github API never returns a null body (which the updater
-        # can't parse).
-        awk -v ver="## Version ${VERSION}" '
-          $0 == ver { f = 1; next }
-          f && /^## Version / { exit }
-          f { print }
-        ' site/src/content/docs/history.md > release_notes.md
-        if [ ! -s release_notes.md ]; then
-          printf 'GWToolbox++ %s\n\nSee https://gwtoolbox.com/history for details.\n' "$VERSION" > release_notes.md
-        fi
+        # Fork release bodies use cumulative GWToolboxdll.patch.txt notes, appended when the
+        # fork revision changes. Upstream previously extracted an exact version heading from
+        # history.md so "8.3" could not match "8.30", stopping at the next version heading.
+        # Its non-empty fallback avoided null GitHub release bodies the updater could not parse;
+        # this fork supplies its release body directly from the maintained patch-notes file.
+        cp GWToolboxdll/GWToolboxdll.patch.txt release_notes.md
 
         git config user.name "GitHub Actions"
         git config user.email "actions@github.com"
@@ -319,14 +299,15 @@ jobs:
         gh release create "$TAG_NAME" \
           --title "$TAG_NAME" \
           --notes-file release_notes.md \
-          "$BIN_DIR/GWToolbox.exe" "$BIN_DIR/GWToolboxdll.dll" GWToolboxdll.pdb.gz "${EXTRA[@]}"
+          "$BIN_DIR/GWToolbox.exe" "$BIN_DIR/GWToolboxdll.dll" \
+          "$BIN_DIR/GWToolboxdll.version.json" "GWToolboxdll/GWToolboxdll.patch.txt" "${EXTRA[@]}"
 
     # --- fork-only: rolling plugins-latest release --------------------------------
     # Plugins link against GWToolboxdll, so every master build produces a fresh
     # compatible set. This keeps a single "plugins-latest" pre-release whose assets
     # (the loose plugin build artifacts) are overwritten in place on every master
     # build - independent of the versioned GWToolbox release above, which only
-    # fires on a CMakeLists.txt version bump.
+    # fires when the Toolbox fork revision produces a new release tag.
     - name: Publish rolling plugins-latest release
       if: github.ref == 'refs/heads/master' && github.repository != 'gwdevhub/GWToolboxpp' && hashFiles('staging/plugins/**') != ''
       shell: bash

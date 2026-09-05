@@ -10,9 +10,10 @@
 #include <GWCA/Utilities/Scanner.h>
 
 #include <Modules/CrashHandler.h>
-#include <Modules/PluginModule.h>
+#include <ForkVersion.h>
+#include <mutex>
 #include <Modules/Resources.h>
-#include <Modules/Updater.h>
+
 #include <GWToolbox.h>
 #include <Defines.h>
 #include <Defender.h>
@@ -21,6 +22,9 @@
 #include <Utils/TextUtils_Time.h>
 
 namespace {
+    std::mutex diagnostics_mutex;
+    std::string plugin_diagnostics;
+    std::string update_diagnostics;
     char* tb_exception_message = nullptr;
 
     // Set once a dump has actually landed on disk, so a second entry into Crash() doesn't report a write failure.
@@ -312,24 +316,7 @@ LONG WINAPI CrashHandler::Crash(EXCEPTION_POINTERS* pExceptionPointers, const ch
     }
 
 
-#ifndef _DEBUG
-    if (!Updater::IsLatestVersion()) {
-        const std::wstring error_message = L"YOU ARE NOT USING THE LATEST VERSION OF GWTOOLBOX++!\n\n"
-            L"Please update to the latest version before reporting any issues.\n"
-            L"No crash dump will be created because the issue may have already been fixed.";
 
-        MessageBoxW(nullptr, error_message.c_str(), L"GWToolbox++ - Outdated Version", MB_OK | MB_ICONERROR | MB_SYSTEMMODAL | MB_TOPMOST);
-        TerminateProcess(GetCurrentProcess(), 1);
-    }
-    if (!PluginModule::GetPlugins().empty()) {
-        const std::wstring error_message = L"YOU ARE USING PLUGINS!\n\n"
-            L"Do not report issues that happen while you are using plugins.\n"
-            L"No crash dump will be created because the issue may not come from Toolbox.";
-
-        MessageBoxW(nullptr, error_message.c_str(), L"GWToolbox++ - Plugins used", MB_OK | MB_ICONERROR | MB_SYSTEMMODAL | MB_TOPMOST);
-        TerminateProcess(GetCurrentProcess(), 1);
-    }
-#endif
 
     const std::wstring crash_folder = ResolveCrashFolder();
 
@@ -360,7 +347,7 @@ LONG WINAPI CrashHandler::Crash(EXCEPTION_POINTERS* pExceptionPointers, const ch
     const auto stLocalTime = TextUtils::Time::GetCurrentSystemTime();
     wchar_t szFileName[MAX_PATH];
     const auto fn_print = swprintf(
-        szFileName, MAX_PATH, L"%s\\%S%S-%04d%02d%02d-%02d%02d%02d-%ld-%ld.dmp", crash_folder.c_str(), GWTOOLBOXDLL_VERSION, GWTOOLBOXDLL_VERSION_BETA, stLocalTime.year, stLocalTime.month, stLocalTime.day, stLocalTime.hour, stLocalTime.minute,
+        szFileName, MAX_PATH, L"%s\\%S%S-%04d%02d%02d-%02d%02d%02d-%ld-%ld.dmp", crash_folder.c_str(), GWTOOLBOX_FORK_DISPLAY_VERSION, GWTOOLBOXDLL_VERSION_BETA, stLocalTime.year, stLocalTime.month, stLocalTime.day, stLocalTime.hour, stLocalTime.minute,
         stLocalTime.second, ProcessId, ThreadId
     );
 
@@ -395,6 +382,12 @@ LONG WINAPI CrashHandler::Crash(EXCEPTION_POINTERS* pExceptionPointers, const ch
         extra_info = tb_exception_message;
     }
 
+    auto crash_details = std::format("Toolbox {} build {}\n{}\n", GWTOOLBOX_FORK_DISPLAY_VERSION, GWTOOLBOX_FORK_BUILD_ID, extra_info ? extra_info : "");
+    {
+        std::unique_lock lock(diagnostics_mutex, std::try_to_lock);
+        if (lock.owns_lock()) crash_details += plugin_diagnostics + update_diagnostics;
+    }
+    extra_info = crash_details.c_str();
     if (extra_info) {
         UserStreamParam = new MINIDUMP_USER_STREAM_INFORMATION();
         auto s = new MINIDUMP_USER_STREAM();
@@ -533,4 +526,16 @@ void CrashHandler::Initialize()
 #ifdef _DEBUG
     ASSERT(AppendStackTraceToCrashMessage_Func);
 #endif
+}
+
+void CrashHandler::SetPluginDiagnostics(std::string diagnostics)
+{
+    std::scoped_lock lock(diagnostics_mutex);
+    plugin_diagnostics = std::move(diagnostics);
+}
+
+void CrashHandler::SetUpdateDiagnostics(std::string diagnostics)
+{
+    std::scoped_lock lock(diagnostics_mutex);
+    update_diagnostics = std::move(diagnostics);
 }

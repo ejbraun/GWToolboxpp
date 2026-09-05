@@ -62,6 +62,7 @@ LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_UK
 
 #include <windows.h>
 #include "Defines.h"
+#include <ForkVersion.h>
 
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION     GWTOOLBOX_MODULE_VERSION
@@ -73,14 +74,14 @@ BLOCK "040904E4"
 BEGIN
 VALUE "CompanyName", "gwdevhub"
 VALUE "FileDescription", "Tools for Guild Wars"
-VALUE "FileVersion", GWTOOLBOX_MODULE_VERSION
+VALUE "FileVersion", GWTOOLBOX_FORK_DISPLAY_VERSION
 VALUE "InternalName", "GWToolboxdll"
 VALUE "LegalCopyright", "Guild Wars and all associated logos and designs are trademarks or registered trademarks of NCsoft Corporation. All other trademarks are the property of their respective owners."
 VALUE "LegalTrademarks1", ""
 VALUE "LegalTrademarks2", ""
 VALUE "OriginalFilename", "GWToolboxdll.dll"
 VALUE "ProductName", "GWToolbox++"
-VALUE "ProductVersion", GWTOOLBOXDLL_VERSION
+VALUE "ProductVersion", GWTOOLBOX_FORK_DISPLAY_VERSION
 END
 END
 

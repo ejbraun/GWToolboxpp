@@ -2,6 +2,7 @@
 #include <GWCA/Managers/MapMgr.h>
 
 #include <Defines.h>
+#include <ForkVersion.h>
 #include <GWToolbox.h>
 #include <Utils/GuiUtils.h>
 
@@ -396,7 +397,7 @@ void SettingsWindow::Draw(IDirect3DDevice9*)
         ImGui::PushTextWrapPos();
         ImGui::Text("GWToolbox++");
         ImGui::SameLine(0, 0);
-        ImGui::TextColored(sCol, " v%s ", GWTOOLBOXDLL_VERSION);
+        ImGui::TextColored(sCol, " v%s ", GWTOOLBOX_FORK_DISPLAY_VERSION);
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Go to %s", GWTOOLBOX_WEBSITE);
         }

@@ -16,6 +16,8 @@ public:
     bool HasSettings() override { return false; }
 
     void Initialize() override;
+    static void SetPluginDiagnostics(std::string diagnostics);
+    static void SetUpdateDiagnostics(std::string diagnostics);
 
     void Terminate() override;
 

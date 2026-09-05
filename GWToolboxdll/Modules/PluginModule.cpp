@@ -49,7 +49,7 @@ namespace {
             GW::GameThread::Enqueue([barrier = plugin.stop_barrier] { barrier->store(true); });
             plugin.terminating = true;
         }
-        if (!plugin.stop_barrier->load() || (plugin.instance && !plugin.instance->CanTerminate())) return false;
+        if (!plugin.stop_barrier->load() || (plugin.instance && !plugin.instance->CanTerminate())) return false; // Pending
         if (plugin.instance && plugin.initialized) plugin.instance->Terminate();
         plugin.initialized = false;
         plugin.instance = nullptr;
@@ -159,6 +159,8 @@ namespace {
 
     void RefreshDlls()
     {
+        // when we refresh, how do we map the modules that were already loaded to the ones on disk?
+        // the dll file may have changed
         namespace fs = std::filesystem;
 
         const fs::path plugin_folder = pluginsfoldername;
@@ -211,7 +213,7 @@ void PluginModule::DrawSettingsInternal()
         const bool is_showing = has_settings ? ImGui::CollapsingHeader(buf, ImGuiTreeNodeFlags_AllowOverlap) : ImGui::CollapsingHeader(buf, ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_AllowOverlap);
 
         if (const auto icon = plugin->initialized && !plugin->terminating ? plugin->instance->Icon() : nullptr) {
-            const float text_offset_x = ImGui::GetTextLineHeightWithSpacing() + 4.0f;
+            const float text_offset_x = ImGui::GetTextLineHeightWithSpacing() + 4.0f; // TODO: find a proper number
             ImGui::GetWindowDrawList()->AddText(
                 ImVec2(pos.x + text_offset_x, pos.y + style.ItemSpacing.y / 2),
                 ImColor(style.Colors[ImGuiCol_Text]), icon);
@@ -361,6 +363,7 @@ void PluginModule::LoadSettings(SettingsDoc& doc, ToolboxIni* legacy)
             plugins_enabled_from_settings.push_back(plugin);
         }
     }
+    // Find any plugins that are currently loaded but not supposed to be
     auto to_unload = std::views::filter(plugins_loaded, [&](auto plugin) {
         return !std::ranges::contains(plugins_enabled_from_settings, plugin);
     }) | std::ranges::to<std::vector>();
@@ -384,6 +387,7 @@ void PluginModule::SaveSettings(SettingsDoc& doc)
 void PluginModule::Update(const float delta)
 {
     std::scoped_lock lock(plugin_mutex);
+    // Unloading changes plugins_loaded; iterate a snapshot instead of breaking and skipping a frame.
     for (const auto plugin : std::vector(plugins_loaded)) {
         if (plugin->terminating) {
             if (UnloadPlugin(plugin, true)) continue;

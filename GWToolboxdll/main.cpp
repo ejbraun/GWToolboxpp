@@ -36,7 +36,7 @@ namespace {
         GWToolbox::MainLoop(dllmodule);
         if(GetUserDefaultLCID_Func) MH_DisableHook(GetUserDefaultLCID_Func);
         thread_running = false;
-        if (!is_detaching) {
+        if (!is_detaching && !GWToolbox::IsProcessExiting()) {
             FreeLibraryAndExitThread(dllmodule, EXIT_SUCCESS);
         }
         return 0;
@@ -63,6 +63,7 @@ extern "C" __declspec(dllexport) const char* GWToolboxVersion = GWTOOLBOXDLL_VER
 
 extern "C" __declspec(dllexport) void __cdecl Terminate()
 {
+    if (GWToolbox::IsProcessExiting()) return;
     if (thread_running) {
         // Tell tb to close, then wait for the thread to finish.
         GWToolbox::SignalTerminate();
@@ -73,14 +74,14 @@ extern "C" __declspec(dllexport) void __cdecl Terminate()
         Sleep(16);
     }
     Sleep(16);
-    if (!is_detaching) {
+    if (!is_detaching && !GWToolbox::IsProcessExiting()) {
         FreeLibraryAndExitThread(dllmodule, EXIT_SUCCESS);
     }
 }
 
 
 // DLL entry point, dont do things in this thread unless you know what you are doing.
-BOOL WINAPI DllMain(_In_ const HMODULE hDllHandle, _In_ const DWORD reason, _In_opt_ const LPVOID)
+BOOL WINAPI DllMain(_In_ const HMODULE hDllHandle, _In_ const DWORD reason, _In_opt_ const LPVOID reserved)
 {
     DisableThreadLibraryCalls(hDllHandle);
     switch (reason) {
@@ -98,7 +99,8 @@ BOOL WINAPI DllMain(_In_ const HMODULE hDllHandle, _In_ const DWORD reason, _In_
         break;
         case DLL_PROCESS_DETACH: {
             is_detaching = true;
-            Terminate();
+            // Windows has already stopped other threads during process exit; waiting here cannot drain plugin work.
+            if (!reserved) Terminate();
         }
         break;
         default:

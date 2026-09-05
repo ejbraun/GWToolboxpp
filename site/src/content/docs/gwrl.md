@@ -4,9 +4,9 @@ description: "User-requested launcher updates, in-game notifications, connection
 section: features
 ---
 
-Open **Settings → GWRL** for launcher connection status and pending updates. A dismissible notification appears when the launcher reports a changed update list. GWRL is an unversioned module built into Toolbox and starts before plugin autoload. It ships with `GWToolboxdll.dll` and has no separate release version or manifest.
+Open **Settings → GWRL** for launcher connection status and pending updates. A dismissible notification appears when the launcher reports a new available build. Repeated polling and transient empty reports do not repeatedly close/reopen it. GWRL is an unversioned module built into Toolbox and starts before plugin autoload. It ships with `GWToolboxdll.dll` and has no separate release version or manifest.
 
-GWRLauncher manages downloads, verification, installation, rollback and reinjection. Toolbox's own release downloader is disabled. Updates start only when you select **Update now** here or explicitly request them in the launcher. Notification alone does not interrupt gameplay.
+GWRLauncher manages downloads, verification, installation, rollback and reinjection. Toolbox's own release downloader is disabled. Updates start only when you select **Update now** here or explicitly request them in the launcher. Notification alone does not interrupt gameplay. The in-game status distinguishes a sent request from launcher acknowledgement and reports rejections, disconnects and unanswered requests. No acknowledgement or timeout triggers an unload by itself.
 
 This fork implements the [GWRL communication protocol](/docs/gwrl_protocol/) for normal Toolbox restart and selective plugin reload. The launcher must implement the same contract and complete live-client integration testing before coordinated updates can be enabled.
 

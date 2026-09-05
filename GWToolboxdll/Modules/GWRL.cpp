@@ -6,6 +6,14 @@
 #include <Modules/PluginModule.h>
 #include <Utils/TextUtils.h>
 
+template<> struct glz::meta<Gwrl::Message> {
+    template<class T> static bool skip_if(const T& value, const std::string_view key, const glz::meta_context&)
+    {
+        if constexpr (std::is_same_v<T, std::vector<Gwrl::Artifact>>) return key == "artifacts" && value.empty();
+        return false;
+    }
+};
+
 namespace {
     constexpr auto json_options = glz::opts{.error_on_unknown_keys = false};
 }
@@ -48,7 +56,7 @@ std::vector<Gwrl::Artifact> GWRL::Inventory(const bool refresh) const
     return inventory;
 }
 
-void GWRL::Send(Gwrl::Message message)
+bool GWRL::Send(Gwrl::Message message)
 {
     message.session_id = session_;
     message.pid = GetCurrentProcessId();
@@ -59,8 +67,10 @@ void GWRL::Send(Gwrl::Message message)
     if (glz::write_json(message, json) || !transport_.Send(json)) {
         welcomed_ = false;
         detail_ = "GWRL connection is unavailable. The launcher must reconnect to continue.";
+        return false;
     }
     last_response_ = std::move(json);
+    return true;
 }
 
 void GWRL::Reply(const Gwrl::Message& request, const char* type, const std::string& code, const std::string& detail)
@@ -91,13 +101,35 @@ void GWRL::Handle(const Gwrl::Message& request)
     }
     if (!welcomed_) { Reply(request, "error", "handshake_required"); return; }
     if (request.type == "ping") { Reply(request, "pong"); return; }
-    if (request.type == "pong" || request.type == "ack") return;
+    if (request.type == "ack" || request.type == "error") {
+        if (!pending_request_.empty() && request.request_id == pending_request_) {
+            if (request.type == "ack") {
+                request_acknowledged_ = true;
+                detail_ = "GWRL acknowledged the request. Waiting for the launcher to stage files and prepare the update.";
+            }
+            else {
+                detail_ = std::format("GWRL rejected the update request: {} {}", request.code, request.detail);
+                pending_request_.clear();
+            }
+        }
+        else if (request.type == "error") {
+            detail_ = std::format("GWRL reported: {} {}", request.code, request.detail);
+        }
+        return;
+    }
+    if (request.type == "pong") return;
     if (request.type == "get_inventory" || request.type == "query_transaction") { Reply(request, "status"); return; }
     if (request.type == "updates_available") {
         if (!request.artifacts.empty() && !Gwrl::ValidatePlan(request.artifacts)) {
             Reply(request, "error", "invalid_plan"); return;
         }
-        if (available_ != request.artifacts) show_notification_ = !request.artifacts.empty();
+        for (const auto& artifact : request.artifacts) {
+            const auto identity = std::format("{}:{}:{}:{}", artifact.name, artifact.version, artifact.abi, artifact.sha256);
+            if (!std::ranges::contains(announced_versions_, identity)) {
+                announced_versions_.push_back(identity);
+                show_notification_ = true;
+            }
+        }
         available_ = request.artifacts;
         Reply(request, "ack");
         return;
@@ -132,6 +164,7 @@ void GWRL::Handle(const Gwrl::Message& request)
             target.abi = artifact.abi;
             target.sha256 = artifact.sha256;
         }
+        pending_request_.clear();
         transaction_ = request.transaction_id;
         state_ = "prepared";
         full_update_ = all;
@@ -161,6 +194,9 @@ void GWRL::Handle(const Gwrl::Message& request)
         PluginModule::CancelReservation();
         state_ = "idle";
         detail_ = "Update transaction complete.";
+        show_notification_ = false;
+        announced_versions_.clear();
+        available_.clear();
         Reply(request, "ack");
         transaction_.clear();
         original_.clear();
@@ -229,7 +265,21 @@ void GWRL::Update(float)
             detail_ = error;
         }
     }
-    if (!connected) welcomed_ = false;
+    if (!connected) {
+        welcomed_ = false;
+        if (!pending_request_.empty()) {
+            detail_ = request_acknowledged_
+                ? "GWRL disconnected after acknowledging the request. Check the launcher for progress before retrying."
+                : "GWRL disconnected before acknowledging the request. No update was started by Toolbox; check the launcher.";
+            pending_request_.clear();
+        }
+    }
+    if (!pending_request_.empty() && now - request_sent_ > (request_acknowledged_ ? 300000u : 30000u)) {
+        detail_ = request_acknowledged_
+            ? "GWRL acknowledged the request but has not prepared an update. Check the launcher for download progress or errors."
+            : "GWRL did not acknowledge the update request. Check the launcher before retrying.";
+        pending_request_.clear();
+    }
     if (connected && generation_ != transport_.Generation()) {
         generation_ = transport_.Generation();
         const auto descriptor = transport_.Connection();
@@ -255,7 +305,8 @@ void GWRL::Update(float)
             || !Gwrl::ValidateEnvelope(request, session_, GetCurrentProcessId(), Gwrl::ProcessStarted(GetCurrentProcess()))) continue;
         last_received_ = now;
         const auto mutation = request.type != "ping" && request.type != "pong" && request.type != "get_inventory"
-            && request.type != "query_transaction" && request.type != "welcome" && request.type != "updates_available";
+            && request.type != "query_transaction" && request.type != "welcome" && request.type != "updates_available"
+            && request.type != "ack" && request.type != "error";
         if (mutation) {
             if (const auto prior = replies_.find(request.request_id); prior != replies_.end()) {
                 if (prior->second.first != json) Reply(request, "error", "request_id_reused");
@@ -326,15 +377,20 @@ void GWRL::DrawStatus()
     if (!detail_.empty()) ImGui::TextWrapped("%s", detail_.c_str());
     if (available_.empty()) ImGui::TextDisabled("No pending updates reported by GWRL.");
     for (const auto& artifact : available_) ImGui::BulletText("%s  v%u", artifact.name.c_str(), artifact.version);
-    ImGui::BeginDisabled(!welcomed_ || !transport_.Connected() || available_.empty() || state_ != "idle" || !transaction_.empty());
+    ImGui::BeginDisabled(!welcomed_ || !transport_.Connected() || available_.empty() || state_ != "idle" || !transaction_.empty() || !pending_request_.empty());
     if (ImGui::Button("Update now")) {
         Gwrl::Message request;
         request.type = "update_request";
         request.request_id = "tb-" + std::to_string(++request_number_);
         request.user_initiated = true;
         request.artifacts = available_;
-        Send(std::move(request));
-        detail_ = "Update requested. GWRL will stage the files and coordinate affected accounts.";
+        const auto request_id = request.request_id;
+        if (Send(std::move(request))) {
+            pending_request_ = request_id;
+            request_sent_ = GetTickCount64();
+            request_acknowledged_ = false;
+            detail_ = "Update request sent. Waiting for GWRL to acknowledge it.";
+        }
     }
     ImGui::EndDisabled();
 }

@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include <atomic>
 
 #include <bcrypt.h>
 #pragma comment(lib, "bcrypt.lib")
@@ -248,6 +249,7 @@ namespace {
     bool gwtoolbox_disabled = false;
 
     bool pending_detach_dll = false;
+    std::atomic_bool process_exiting = false;
 
     bool greeted = false;
 
@@ -874,6 +876,8 @@ DWORD __stdcall GWToolbox::MainLoop(LPVOID module) noexcept
             Sleep(100);
         }
 
+        if (IsProcessExiting()) return EXIT_SUCCESS;
+
         // @Remark:
         // Hooks are disable from Guild Wars thread (safely), so we just make sure we exit the last hooks
         GW::DisableHooks();
@@ -1056,15 +1060,24 @@ std::filesystem::path GWToolbox::SaveSettings()
     return doc->location_on_disk;
 }
 
+bool GWToolbox::IsProcessExiting()
+{
+    return process_exiting.load();
+}
+
 void GWToolbox::ForceTerminate(bool detach_wndproc_handler)
 {
-    if (gwtoolbox_state == GWToolboxState::Terminated) return;
+    if (gwtoolbox_state == GWToolboxState::Terminated || process_exiting.exchange(true)) return;
     ASSERT(DetachGameLoopCallback());
     ASSERT(!detach_wndproc_handler || DetachWndProcHandler());
 
-    SignalTerminate();
-    DrawTerminating(nullptr);
-    UpdateTerminating(0.f, true);
+    if (gwtoolbox_state != GWToolboxState::Terminating) {
+        SignalTerminate();
+        DrawTerminating(nullptr);
+    }
+    // Pending modules keep their DLLs until process teardown; the game loop may never service their unload barriers.
+    UpdateTerminating(0.f);
+    ASSERT(DetachGameLoopCallback());
 
     GW::DisableHooks();
 
@@ -1110,6 +1123,7 @@ bool GWToolbox::CanTerminate()
 
 void GWToolbox::Update(GW::HookStatus*)
 {
+    if (IsProcessExiting()) return;
     static DWORD last_tick_count;
     if (last_tick_count == 0) {
         last_tick_count = GetTickCount();
@@ -1363,11 +1377,11 @@ void GWToolbox::UpdateInitialising(float)
     gwtoolbox_state = GWToolboxState::DrawInitialising;
 }
 
-void GWToolbox::UpdateModulesTerminating(float delta_f, bool panicking)
+void GWToolbox::UpdateModulesTerminating(float delta_f)
 {
 terminate_modules:
     for (const auto m : modules_terminating) {
-        if (m->CanTerminate() || panicking) {
+        if (m->CanTerminate()) {
             m->Terminate();
             const auto found = std::ranges::find(modules_terminating, m);
             ASSERT(found != modules_terminating.end());
@@ -1378,7 +1392,7 @@ terminate_modules:
     }
 }
 
-void GWToolbox::UpdateTerminating(float delta_f, bool panicking)
+void GWToolbox::UpdateTerminating(float delta_f)
 {
     ASSERT(gwtoolbox_state == GWToolboxState::Terminating);
 
@@ -1386,7 +1400,7 @@ void GWToolbox::UpdateTerminating(float delta_f, bool panicking)
         ASSERT(ToggleModule(*modules_enabled[0], false) == false);
     }
     ASSERT(modules_enabled.empty());
-    UpdateModulesTerminating(delta_f, panicking);
+    UpdateModulesTerminating(delta_f);
     if (!modules_terminating.empty()) return;
 
     ASSERT(DetachWndProcHandler());

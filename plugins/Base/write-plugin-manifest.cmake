@@ -13,7 +13,7 @@
 #   sha256      string  - lowercase hex SHA-256 of the dll     (always)
 #   version     number  - protocol / build version            (only if the caller
 #                                                               passed one)
-#   display_version string - upstream/fork display version   (only if supplied)
+# Display text lives in the DLL version resource; manifests carry only the integer revision.
 #   toolbox_abi number - Toolbox/plugin binary compatibility  (only if supplied)
 #   build_id    string - source build identifier              (only if supplied)
 #
@@ -21,7 +21,7 @@
 # rewrites the dll after this runs, so the manifest must then be regenerated
 # post-sign (a signing workflow must do this; this fork ships unsigned).
 #
-# Args, all via -D: NAME, DLL, OUTPUT, and optionally VERSION, DISPLAY_VERSION, ABI, BUILD_ID.
+# Args, all via -D: NAME, DLL, OUTPUT, and optionally VERSION, ABI, BUILD_ID.
 if(NOT DEFINED NAME OR NOT DEFINED DLL OR NOT DEFINED OUTPUT)
     message(FATAL_ERROR "write-plugin-manifest.cmake: NAME, DLL and OUTPUT are required")
 endif()
@@ -38,9 +38,6 @@ if(DEFINED VERSION AND NOT VERSION STREQUAL "")
 endif()
 list(APPEND LINES "  \"compiled_at\": \"${COMPILED_AT}\"")
 list(APPEND LINES "  \"sha256\": \"${DLL_SHA256}\"")
-if(DEFINED DISPLAY_VERSION AND NOT DISPLAY_VERSION STREQUAL "")
-    list(APPEND LINES "  \"display_version\": \"${DISPLAY_VERSION}\"")
-endif()
 if(DEFINED ABI AND NOT ABI STREQUAL "")
     list(APPEND LINES "  \"toolbox_abi\": ${ABI}")
 endif()

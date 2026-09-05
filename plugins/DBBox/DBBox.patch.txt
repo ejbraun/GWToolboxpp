@@ -1,3 +1,6 @@
 ## v1 - 2026-09-05
 - Add independent Tactical Minimap with modifier-based interaction and opacity.
 - Add embedded integer version metadata and cooperative GWRL updates.
+
+## v2 - 2026-09-05
+- Fix Tactical Minimap movement and resizing when its window locks are disabled.

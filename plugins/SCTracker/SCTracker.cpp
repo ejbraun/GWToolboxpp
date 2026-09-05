@@ -520,6 +520,7 @@ namespace {
         GW::Constants::ItemID::EternalBlade,     // Eternal Blade
         GW::Constants::ItemID::MiniDhuum,        // Mini Dhuum
         GW::Constants::ItemID::MiniSmiteCrawler, // Miniature Smite Crawler
+        GW::Constants::ItemID::MiniThulZaDhuum,  // Miniature Thul Za Dhuum
     };
 
     // Encoded prefix for the "<player> has resigned." system chat message. Not human-readable text -

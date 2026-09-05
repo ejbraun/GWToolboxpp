@@ -45,6 +45,7 @@
 #include <Modules/ToolboxTheme.h>
 #include <Modules/TransmoModule.h>
 #include <Modules/Updater.h>
+#include <Modules/GWRL.h>
 #include <Windows/SettingsWindow.h>
 
 #include <Widgets/Minimap/Minimap.h>
@@ -1339,6 +1340,7 @@ void GWToolbox::UpdateInitialising(float)
 
     Log::Log("Creating Modules\n");
     ToggleModule(CrashHandler::Instance());
+    ToggleModule(GWRL::Instance());
     ToggleModule(Resources::Instance());
     ToggleModule(ToolboxTheme::Instance());
     ToggleModule(ItemDescriptionHandler::Instance());

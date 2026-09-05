@@ -79,6 +79,7 @@ void MainWindow::RefreshButtons()
 
 void MainWindow::Draw(IDirect3DDevice9*)
 {
+    const auto plugin_lock = PluginModule::AcquireLock();
     if (!visible) {
         return;
     }

@@ -1,0 +1,8 @@
+#pragma once
+#define TB_ARTIFACT_NAME "@_tb_artifact_name@"
+#define TB_ARTIFACT_VERSION @_tb_plugin_version@
+#define TB_ARTIFACT_VERSION_STRING "@_tb_plugin_version@"
+#define TB_ARTIFACT_VERSION_HIGH @_tb_version_high@
+#define TB_ARTIFACT_VERSION_LOW @_tb_version_low@
+#define TB_ARTIFACT_ABI @GWTOOLBOX_PLUGIN_ABI@
+#define TB_ARTIFACT_BUILD "@GWTOOLBOX_FORK_BUILD_ID@"

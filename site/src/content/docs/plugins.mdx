@@ -1,49 +1,29 @@
 ---
-title: "GWToolbox++ Plugins"
-description: "Adding, enabling, and troubleshooting third-party plugin DLLs, plus the safety and Terms-of-Service risks of doing so."
+title: "GWToolbox fork plugins"
+description: "Loading supported plugins, managing independent DBBox features and updating them through GWRL."
 section: features
 ---
 
 import ToolboxPath from '../../components/ToolboxPath.astro';
 
-Open from <ToolboxPath kind="window" steps={["Toolbox", "Plugins"]} /> or <ToolboxPath kind="command" steps={["/show plugins"]} />. Per-window options live under <ToolboxPath steps={["Settings", "Plugins"]} />.
+Open <ToolboxPath steps={["Settings", "Plugins"]} /> to load or unload plugins. This fork explicitly supports its distributed DBBox and SCTracker plugins. Report fork/plugin issues to the fork maintainer with the exact build and reproduction steps.
 
-## ⚠️ IMPORTANT SAFETY WARNING ⚠️
+GWRLauncher manages installation and updates for artifacts supported by its backend. Toolbox discovers DLLs in `Documents/GWToolboxpp/<ComputerName>/plugins`; **Refresh** rescans the directory. A first-time installation does not automatically load or enable a plugin in a running client; use the normal refresh/load or startup behavior. Use **Load** or **Unload** beside a plugin. Only load artifacts from authors you trust, since plugins execute code inside the game process.
 
-**Plugins are NOT officially supported by GWToolbox++ developers and may be unsafe. Use plugins at your own risk and only if you fully trust the author.**
+DBBox reports its integer version in the plugin list and Windows file properties. Existing plugins without version metadata can still load under their existing interface.
 
-**Using plugins is NOT permitted by ArenaNet and may violate the Guild Wars Terms of Service. Using plugins could result in account suspension or banning.**
+## DBBox features
 
-## What are Plugins?
+Expand DBBox to enable or disable individual features. Each has its own instance, settings and shutdown lifecycle. **Stopping...** means pending work is draining. Visibility hides a feature's UI without disabling it.
 
-Plugins are additional features or modifications that can be added to GWToolbox++. They are created by third-party developers and are not part of the official GWToolbox++ package.
+The [Tactical Minimap](/docs/tactical_minimap/) is disabled by default and has its own opacity, controls and renderer. Its settings do not modify Toolbox's built-in minimap or Mission Map.
 
-## Using Plugins
+## Updates and crash reports
 
-If you choose to use plugins despite the risks, here's how to add them to GWToolbox++:
+[GWRL](/docs/gwrl/) displays pending updates and lets you request one in game. This fork implements the [protocol](/docs/gwrl_protocol/); launcher integration and live-client acceptance testing are still required.
 
-1. Place the plugin DLL file in the `plugins` folder of GWToolbox++.
-2. Restart GWToolbox++ or use the "Refresh" button in the Plugins settings.
-3. Enable the plugin through the GWToolbox++ interface.
+For plugin-only updates, the launcher coordinates every client sharing a selected outdated plugin file. Toolbox uses its normal settings-save/unload path, then reloads only selected plugins that the particular instance previously had loaded. Manual loading/unloading of those selected plugins is held during the transaction; other plugins and saved enabled selections are not changed by the update.
 
-## Plugin Settings
+When Toolbox itself is updated, GWRL requests its normal full exit. After verified replacement and reinjection, Toolbox restores its own settings and plugin selections through normal startup. The launcher does not maintain a separate snapshot of Toolbox's plugin state.
 
-Some plugins may have their own settings. These can usually be accessed through the GWToolbox++ settings interface.
-
-## Visibility Control
-
-You can show or hide a plugin's UI through the GWToolbox++ interface, typically by toggling a checkbox next to the plugin's name.
-
-## Troubleshooting
-
-If you encounter any issues while using plugins:
-
-1. Disable all plugins and see if the issue persists.
-2. If the issue is resolved, re-enable plugins one by one to identify the problematic one.
-3. Report the issue to the plugin developer, not to GWToolbox++ developers.
-
-Remember, GWToolbox++ developers do not provide support for third-party plugins. If you encounter any bugs or issues while using plugins, do not report them to the GWToolbox++ team.
-
-## Final Reminder
-
-By using plugins, you acknowledge that you're doing so at your own risk. GWToolbox++ developers are not responsible for any consequences resulting from the use of third-party plugins.
+This fork attempts to write crash dumps with plugins loaded. Share dumps manually with the fork maintainer, with build/version, plugin list, enabled DBBox features and reproduction steps. Disabling features individually can help isolate a fault; it is not required to generate a dump.

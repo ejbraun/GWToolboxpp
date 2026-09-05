@@ -19,6 +19,7 @@
 #include <Slowload.h>
 #include <SpeedrunScriptingTools.h>
 #include <TargetDetector.h>
+#include <TacticalMinimap.h>
 #include <TrackerAdvancedPlugin.h>
 
 #include <GWCA/Managers/UIMgr.h>
@@ -40,7 +41,7 @@ DLLAPI ToolboxPlugin* ToolboxPluginChildInstance(const size_t index)
 
 DBBox::DBBox()
 {
-    features_.reserve(17);
+    features_.reserve(18);
     features_.push_back({"AgentPopTimer", "Agent Pop Timer", [] { return std::make_unique<AgentPopTimer>(); }});
     features_.push_back({"ArmorSwap", "Armor Swap", [] { return std::make_unique<ArmorSwap::Plugin>(); }});
     features_.push_back({"ChestOpener", "Chest Opener", [] { return std::make_unique<ChestOpener>(); }});
@@ -56,6 +57,7 @@ DBBox::DBBox()
     features_.push_back({"SkinChanger", "Skin Changer", [] { return std::make_unique<SkinChanger>(); }});
     features_.push_back({"Slowload", "Slowload", [] { return std::make_unique<Slowload>(); }});
     features_.push_back({"SpeedrunScriptingTools", "Speedrun Scripting Tools", [] { return std::make_unique<SpeedrunScriptingTools>(); }});
+    features_.push_back({"TacticalMinimap", "Tactical Minimap", [] { return std::make_unique<TacticalMinimap>(); }, false});
     features_.push_back({"TargetDetector", "Target Detector", [] { return std::make_unique<TargetDetector>(); }});
     features_.push_back({"TrackerAdvanced", "Tracker Advanced", [] { return std::make_unique<TrackerAdvanced::TrackerAdvancedPlugin>(); }});
 }

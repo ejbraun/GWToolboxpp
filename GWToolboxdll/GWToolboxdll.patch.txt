@@ -1,0 +1,5 @@
+## v1 - 2026-09-05
+- Add GWRL launcher communication for user-requested coordinated updates.
+- Display the fork revision separately from the upstream Toolbox version.
+- Support crash dumps with plugins loaded and retain plugin diagnostics.
+- Fix DBBox drawing and cooperative plugin unloading.

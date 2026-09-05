@@ -371,3 +371,11 @@ else()
         VERBATIM
     )
 endif()
+
+add_custom_command(TARGET GWToolboxdll POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -DNAME=GWToolboxdll -DVERSION=${GWTOOLBOX_FORK_VERSION}
+        -DDISPLAY_VERSION=${GWTOOLBOX_FORK_DISPLAY_VERSION} -DABI=${GWTOOLBOX_PLUGIN_ABI} -DBUILD_ID=${GWTOOLBOX_FORK_BUILD_ID}
+        -DDLL=$<TARGET_FILE:GWToolboxdll>
+        -DOUTPUT=$<TARGET_FILE_DIR:GWToolboxdll>/GWToolboxdll.version.json
+        -P "${PROJECT_SOURCE_DIR}/plugins/Base/write-plugin-manifest.cmake"
+    VERBATIM)

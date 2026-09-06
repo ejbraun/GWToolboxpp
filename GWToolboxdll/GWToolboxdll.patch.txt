@@ -3,3 +3,10 @@
 - Display the fork revision separately from the upstream Toolbox version.
 - Support crash dumps with plugins loaded and retain plugin diagnostics.
 - Fix DBBox drawing and cooperative plugin unloading.
+
+## v2 - 2026-09-05
+- Fix shared Main Window button IDs for plugins and DBBox features.
+- Stabilize GWRL update notifications and report launcher acknowledgement, rejection, disconnects and timeouts.
+- Add a default-disabled switch for Game Settings name tag recoloring.
+- Publish only the integer fork revision in the Toolbox manifest.
+- Fix the game-exit assertion caused by finalizing plugins before asynchronous unload work completed.

@@ -17,7 +17,7 @@ GWRL is an unversioned built-in Toolbox module. It ships inside `GWToolboxdll.dl
 
 ## Local outputs and checks
 
-The native build emits `DBBox.version.json` and `GWToolboxdll.version.json` beside the DLLs. Both contain `name`, integer `version`, UTC `compiled_at`, DLL `sha256`, `toolbox_abi` and `build_id`. Toolbox also carries `display_version`. DBBox embeds its integer Windows version text and exposes `ToolboxArtifactInfo` to the running bridge.
+The native build emits `DBBox.version.json` and `GWToolboxdll.version.json` beside the DLLs. Both contain `name`, integer `version`, UTC `compiled_at`, DLL `sha256`, `toolbox_abi` and `build_id`. The Toolbox manifest carries only its integer fork revision; the combined display version remains in the DLL. DBBox embeds its integer Windows version text and exposes `ToolboxArtifactInfo` to the running bridge.
 
 DBBox requires a matching `GWTOOLBOX_PLUGIN_ABI`; a mismatch is refused before initialization. SCTracker retains its existing interface without requiring the new export.
 
@@ -42,7 +42,7 @@ Keep matching DLL/PDB pairs locally, indexed by DLL hash. A revision alone canno
 | Actions build artifact | Build outputs, excluding `.pdb` and `.pdb.gz` files |
 | DBBox metadata/notes | DLL, generated integer manifest and cumulative patch notes in existing `gs://${GCP_PLUGIN_BUCKET}/plugins/DBBox/` objects and GitHub release assets |
 | Toolbox metadata/notes | DLL, generated integer manifest and cumulative `GWToolboxdll.patch.txt` in existing `gs://${GCP_PLUGIN_BUCKET}/plugins/GWToolboxdll/` objects and versioned GitHub release assets |
-| Fork release tag/body | `gwtoolbox-v<upstream>.<fork revision>` with cumulative Toolbox fork patch notes |
+| Fork release tag/body | `gwtoolbox-v<upstream>.<fork revision>`, read from the DLL FileVersion resource, with cumulative Toolbox fork patch notes |
 | Rolling plugin release | Plugin build outputs, excluding symbols, and available patch notes in the existing `plugins-latest` prerelease |
 
 Publication remains restricted to master builds of the fork. Bucket uploads also require the existing Google Cloud secret and bucket variable. A versioned release is created only when its fork tag is absent; the rolling plugin release and configured bucket objects refresh on each eligible master build.

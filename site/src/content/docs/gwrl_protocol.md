@@ -145,6 +145,8 @@ Protocol inventory is limited to the managed Toolbox core and supported backend 
 
 Inventory paths are actual participant paths encoded as UTF-8. Commands **never** choose load paths; the participant looks up its discovered managed inventory. The controller MUST resolve paths, shortcuts/hard links and physical file identity itself to group every consumer of the same target file. Never derive shared-file safety from a filename match alone. Plugin state is `loaded`, `loading`, `unloading` or `unloaded`; Toolbox is reported as loaded until it exits. `enabled` is the persisted plugin choice and must not be changed just because the update temporarily unloads a plugin.
 
+Interpret `artifacts` according to the message type. In `update_request` and `updates_available` it is a target plan, not installed inventory, and installed paths are not required. Heartbeats, errors and unrelated optional arrays must not replace the controller's installed inventory.
+
 For plugin-only updates, the participant remembers actual pre-update loaded state separately from `enabled`. Only selected plugins that it actually unloaded are eligible for reload. Full Toolbox startup instead follows Toolbox's ordinary persisted selection/autoload policy.
 
 ## Handshake, notifications and liveness
@@ -158,7 +160,7 @@ A `welcome` reestablishes the handshake after liveness failure. Physical reconne
 
 After update-driven reinjection, `hello` carries the descriptor's transaction ID and `state: "starting"`, or `"ready"` if normal startup has already completed. Following the handshake, GWRL reports `ready` only after normal Toolbox startup and its scheduled plugin initialization have completed successfully. A startup error is reported as `error`/`startup_failed`; connection alone is not proof of successful restart. No commit command is required to begin startup. `query_transaction` must expose this progress if an event is missed.
 
-Controller sends `updates_available` with a valid plan-shaped artifact list, or an empty list to clear it. Participant acknowledges with `ack`; a changed nonempty list opens the dismissible notification. This does not reserve or unload anything.
+Controller sends `updates_available` with a valid plan-shaped artifact list, or an empty list to clear it. Participant acknowledges with `ack`. A newly announced artifact name/version/hash/ABI opens the dismissible notification. Clearing the pending list does not repeatedly close/reopen an already open window; repeated or reordered entries do not reopen a dismissed notification. This does not reserve or unload anything.
 
 The in-game button sends `update_request` with `user_initiated: true` and the displayed artifacts. This is a **request to the launcher to stage and coordinate**. It does not authorize file replacement independently of the normal transaction. The controller may acknowledge with `ack`. It must revalidate the catalog, affected accounts and hashes rather than blindly trusting the notification's old list. Requests issued directly from the launcher use its normal user confirmation/UI action.
 

@@ -17,7 +17,7 @@ public:
 
 private:
     void Handle(const Gwrl::Message& request);
-    void Send(Gwrl::Message message);
+    bool Send(Gwrl::Message message);
     void Reply(const Gwrl::Message& request, const char* type, const std::string& code = {}, const std::string& detail = {});
     std::vector<Gwrl::Artifact> Inventory(bool refresh = false) const;
     void DrawStatus();
@@ -26,7 +26,10 @@ private:
     Gwrl::Artifact toolbox_;
     std::vector<Gwrl::Artifact> available_, original_, expected_;
     std::string session_, transaction_, state_ = "idle", detail_;
-    std::string last_request_, last_response_;
+    std::string last_response_, pending_request_;
+    std::vector<std::string> announced_versions_;
+    uint64_t request_sent_ = 0;
+    bool request_acknowledged_ = false;
     std::unordered_map<std::string, std::pair<std::string, std::string>> replies_;
     uint64_t generation_ = 0, last_received_ = 0, next_ping_ = 0, request_number_ = 0;
     bool welcomed_ = false, stopping_ = false, restarted_ = false, full_update_ = false, show_notification_ = false;

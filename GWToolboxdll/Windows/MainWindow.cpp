@@ -119,14 +119,15 @@ void MainWindow::Draw(IDirect3DDevice9*)
             }
             ImGui::PopID();
         }
-        size_t i = 0;
+        ImGui::PushID("plugins");
         for (const auto plugin : PluginModule::GetPlugins() | std::views::filter([](ToolboxPlugin* p) {
             return p && p->GetVisiblePtr() && p->ShowInMainMenu();
         })) {
-            ImGui::PushID(i++);
+            ImGui::PushID(plugin);
             if (drawn) {
                 ImGui::Separator();
             }
+            drawn = true;
             if (plugin->DrawTabButton(settings.show_icons, true, settings.center_align_text)) {
                 if (settings.one_panel_at_time_only && plugin->GetVisiblePtr() && *plugin->GetVisiblePtr()) {
                     for (const auto& module : modules_to_draw | std::views::values) {
@@ -147,6 +148,7 @@ void MainWindow::Draw(IDirect3DDevice9*)
             }
             ImGui::PopID();
         }
+        ImGui::PopID();
         ImGui::PopFont();
     }
     ImGui::End();

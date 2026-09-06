@@ -41,6 +41,7 @@ public:
     static SettingsDoc* GetSettingsDoc(bool fresh = false);
     static std::filesystem::path SaveSettings();
     static void ForceTerminate(bool detach_wndproc_handler = true);
+    static bool IsProcessExiting();
     static std::filesystem::path LoadSettings();
     static bool SetSettingsFolder(const std::filesystem::path& path);
 
@@ -72,6 +73,6 @@ private:
     static void DrawInitialising(IDirect3DDevice9* device);
     static void DrawTerminating(IDirect3DDevice9* device);
     static void UpdateInitialising(float);
-    static void UpdateModulesTerminating(float, bool panicking = false);
-    static void UpdateTerminating(float, bool panicking = false);
+    static void UpdateModulesTerminating(float);
+    static void UpdateTerminating(float);
 };

@@ -9,7 +9,6 @@ parser.add_argument("--bin", type=Path)
 args = parser.parse_args()
 root = Path(__file__).resolve().parents[1]
 versions = (root / "cmake/fork_versions.cmake").read_text()
-upstream = re.search(r'set\(GWTOOLBOXDLL_VERSION "([^"]+)"\)', (root / "CMakeLists.txt").read_text())[1]
 for name, constant, notes in (
     ("DBBox", "DBBOX_PLUGIN_VERSION", "plugins/DBBox/DBBox.patch.txt"),
     ("GWToolboxdll", "GWTOOLBOX_FORK_VERSION", "GWToolboxdll/GWToolboxdll.patch.txt"),
@@ -26,5 +25,5 @@ for name, constant, notes in (
         assert manifest["toolbox_abi"] > 0 and manifest["build_id"], name
         assert (args.bin / f"{name}.pdb").stat().st_size > 0, name
         if name == "GWToolboxdll":
-            assert manifest["display_version"] == f"{upstream}.{version}", manifest
+            assert "display_version" not in manifest, manifest
 print("DBBox and Toolbox release metadata is valid.")

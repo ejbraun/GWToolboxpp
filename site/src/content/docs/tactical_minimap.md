@@ -22,7 +22,7 @@ The minimap draws walkable terrain, agents, the current target, your position an
 
 Map, target, pan and move-character modifiers are configurable. **None** disables the corresponding modifier action. Move-character clicks are disabled by default. Turn off **Enable tactical mode** to interact without holding the map modifier.
 
-Unlock **Lock Position** or **Lock Size** to reposition or resize the window while the map modifier is held. With position unlocked, dragging the map body moves its window. **Recenter** and **Reset window position** are also available in settings.
+Uncheck **Lock Position** or **Lock Size** to reposition or resize the window without holding a modifier. With position unlocked, dragging the map body moves its window. **Recenter** and **Reset window position** are also available in settings.
 
 Opacity fades the entire feature window, terrain, markers and drawings. At zero opacity it accepts no map input; settings remain accessible through DBBox. Neither the slider nor any other setting changes Toolbox's minimap or Mission Map.
 

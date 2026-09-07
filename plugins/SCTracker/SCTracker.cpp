@@ -162,6 +162,27 @@ namespace {
     // kDhuumHostileAllegianceBits above.
     constexpr uint32_t kDhuumObjectiveId = 157;
 
+    // Native mission-objective ids for the Fissure of Woe's 11 quest objectives (ToC 309 .. The Hunt
+    // 319), verbatim from ObjectiveTimerWindow::AddFoWObjectiveSet()'s AddQuestObjective() calls -
+    // mirrored here for the same reason as kDhuumObjectiveId. FoW has no single "run complete" packet,
+    // so a run that reports all 11 of these done (GAME_SMSG_OBJECTIVE_DONE) is treated as a clear -
+    // see SCTracker::fow_completed.
+    const std::unordered_set<uint32_t> kFowQuestObjectiveIds = {
+        309, 310, 311, 312, 313, 314, 315, 316, 317, 318, 319,
+    };
+
+    // A publish HTTP status that will never succeed on retry: any 4xx client error except the ones
+    // that are genuinely transient (408 request timeout, 429 too many requests) or already handled
+    // specially (426 upgrade required -> plugin_outdated, which pauses sync wholesale). A network
+    // error (code 0), a 3xx, or any 5xx is worth retrying. See ProcessSync's publish-failure branch.
+    bool IsTerminalPublishFailure(const int http_code)
+    {
+        if (http_code < 400 || http_code >= 500) {
+            return false;
+        }
+        return http_code != 408 && http_code != 429 && http_code != kHttpStatusUpgradeRequired;
+    }
+
     // Instances GWToolboxdll's ObjectiveTimerWindow tracks AND the backend accepts (map_configs).
     // Re-expand from ObjectiveTimerWindow::AddObjectiveSet()'s switch (more elite areas, dungeons,
     // ToPK) as the backend gains map_configs rows for them. Domain of Anguish is tracked via a
@@ -651,6 +672,8 @@ void SCTracker::OnInstanceLoadInfo(const uint32_t map_id, const bool is_explorab
     resigned_login_numbers.clear();
     dhuum_started = false;
     dhuum_completed = false;
+    fow_objectives_seen_done.clear();
+    fow_completed = false;
     tracked_item_id_to_model_id.clear();
     // Not skill_name_cache itself (deliberately persists - see its declaration) - just events still
     // queued from the previous run. Decoding is near-instant in practice, but without this a very
@@ -831,17 +854,33 @@ void SCTracker::OnAgentUpdateAllegiance(const uint32_t agent_id, const uint32_t 
     }
 }
 
-// GAME_SMSG_MISSION_OBJECTIVE_COMPLETE - fires for any completed native mission objective, not just
-// Dhuum's; only kDhuumObjectiveId is relevant here. Latches dhuum_completed for the rest of the run;
-// OnItemGeneral stops counting Glob of Ectoplasm drops once it's set, and OnGameSrvTransfer uses it
-// as the "run completed" shortcut. Underworld-only: elsewhere dhuum_completed stays false and run
-// completion is decided by ProcessSync's map-agnostic IsRunCompleted fallback.
+// GAME_SMSG_MISSION_OBJECTIVE_COMPLETE - fires for any completed native mission objective. Two uses:
+//   - Underworld: kDhuumObjectiveId latches dhuum_completed for the rest of the run (OnItemGeneral
+//     stops counting Glob of Ectoplasm drops once it's set, and OnGameSrvTransfer uses it as the "run
+//     completed" shortcut).
+//   - Fissure of Woe: FoW has no single "run done" packet, so completion is latched (fow_completed)
+//     once every one of its 11 quest objectives (kFowQuestObjectiveIds) has reported done - the same
+//     set GWToolboxdll's ObjectiveTimerWindow::AddFoWObjectiveSet tracks. See fow_completed.
+// Everywhere else both flags stay false and run completion falls back to ProcessSync's map-agnostic
+// IsRunCompleted, read from GWToolboxdll's (delayed) objective file.
 void SCTracker::OnObjectiveDone(const uint32_t objective_id)
 {
-    if (!run_active || !MapHasDhuumMechanics(pending_map_id) || objective_id != kDhuumObjectiveId) {
+    if (!run_active) {
         return;
     }
-    dhuum_completed = true;
+    if (MapHasDhuumMechanics(pending_map_id)) {
+        if (objective_id == kDhuumObjectiveId) {
+            dhuum_completed = true;
+        }
+        return;
+    }
+    if (static_cast<GW::Constants::MapID>(pending_map_id) == GW::Constants::MapID::The_Fissure_of_Woe
+        && kFowQuestObjectiveIds.contains(objective_id)) {
+        fow_objectives_seen_done.insert(objective_id);
+        if (fow_objectives_seen_done.size() == kFowQuestObjectiveIds.size()) {
+            fow_completed = true;
+        }
+    }
 }
 
 // Role tracking is local-player-only now (see PartyMember::role_skills' comment) - bails immediately
@@ -1052,15 +1091,18 @@ void SCTracker::OnGameSrvTransfer()
     if (end_reason == "unknown" && wipe_detected) {
         end_reason = "wipe";
     }
-    // dhuum_completed is latched in real time off the native GAME_SMSG_MISSION_OBJECTIVE_COMPLETE
-    // packet (see OnObjectiveDone) - the same signal GWToolboxdll uses to mark its own Dhuum
-    // objective Completed, just observed here locally and immediately instead of from its
-    // ObjectiveTimerRuns_*.json file, which isn't flushed to disk until the next map load. This
-    // means "completed" is usually already known right now rather than only after ProcessSync's
-    // later IsRunCompleted fallback (still needed for the rare case a player joined after Dhuum was
-    // already dead and so never saw the packet themselves). Never overrides "wipe" - a genuine
-    // death event stays notable even in the rare case it's right after a kill.
-    if (end_reason != "wipe" && dhuum_completed) {
+    // dhuum_completed (Underworld) / fow_completed (Fissure of Woe) are latched in real time off the
+    // native GAME_SMSG_MISSION_OBJECTIVE_COMPLETE packet(s) (see OnObjectiveDone) - the same signals
+    // GWToolboxdll uses to mark its own objectives Completed, just observed here locally and
+    // immediately instead of from its ObjectiveTimerRuns_*.json file, which isn't flushed to disk
+    // until the next map load. This matters most for FoW: it has no exit portal, so a successful run
+    // is normally left by everyone resigning - without this latch that reads as "resign" and
+    // OnGameSrvTransfer below opens a *failure* vote for a run that actually cleared, only corrected
+    // a map-load later once ProcessSync can read the objective file. With it, "completed" is already
+    // known right now. ProcessSync's later IsRunCompleted fallback still covers the rare case a
+    // player joined mid-run and never saw every objective packet themselves. Never overrides "wipe" -
+    // a genuine death event stays notable even in the rare case it's right after a kill.
+    if (end_reason != "wipe" && (dhuum_completed || fow_completed)) {
         end_reason = "completed";
     }
     WriteLogEntry(pending_utc_start, pending_map_id, pending_character_name, end_reason, party_members);
@@ -1317,7 +1359,8 @@ void SCTracker::ProcessSync()
         }
         else {
             last_publish_attempt_tick = now; // back off before retrying a failed publish
-            if (publish_request->GetStatusCode() == kHttpStatusUpgradeRequired) {
+            const int http_code = publish_request->GetStatusCode();
+            if (http_code == kHttpStatusUpgradeRequired) {
                 plugin_outdated = true;
                 if (!version_check_request) {
                     RequestLatestPluginVersion(); // refresh the exact version number for the DrawSettings message
@@ -1329,7 +1372,28 @@ void SCTracker::ProcessSync()
             }
             AppendLog(std::format("Publish failed for run {}: status={} http_code={} body={}",
                                    publishing_utc_start, publish_request->GetStatusStr(),
-                                   publish_request->GetStatusCode(), body));
+                                   http_code, body));
+            // A non-transient 4xx (a payload the backend will always reject - e.g. "at least 4 party
+            // members must be registered characters", a duplicate, an ineligible run) never succeeds
+            // on retry. Retrying it every kRetryBackoffMs forever also pins the watermark on this run
+            // and wedges any committed vote for it: the vote can never get its run_id, and OpenVote's
+            // guard then refuses every later vote (observed in the wild - a single un-uploadable FoW
+            // run blocked all voting for days). Treat it as terminal: drop the run and advance, same
+            // as the wrong-party-size / give-up-timeout paths below. 408/429 stay transient; 426
+            // already set plugin_outdated above and pauses sync wholesale.
+            if (IsTerminalPublishFailure(http_code)) {
+                AppendLog(std::format("Dropping run {}: terminal publish failure (http {})",
+                                       publishing_utc_start, http_code));
+                last_persisted_utc_start = publishing_utc_start;
+                CancelPendingVoteIfMatching(publishing_utc_start);
+                last_queue_scan_tick = now;
+                if (pending_sync && pending_sync->utc_start == publishing_utc_start) {
+                    pending_sync = FindNextPendingEntry();
+                }
+                if (!settings_folder.empty()) {
+                    SaveSettings(settings_folder.c_str()); // persist the advanced watermark now
+                }
+            }
         }
         publish_request.reset();
     }

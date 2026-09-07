@@ -210,6 +210,17 @@ private:
     // rest of the run. OnItemGeneral stops counting Glob of Ectoplasm drops into item_drops once this
     // is set - other tracked items are unaffected.
     bool dhuum_completed = false;
+    // Fissure of Woe analogue of dhuum_completed. FoW has no single "run complete" packet and no exit
+    // portal (a finished run is normally left by everyone resigning), so completion is instead latched
+    // once every one of its 11 quest objectives (kFowQuestObjectiveIds in the .cpp - the same set
+    // GWToolboxdll's ObjectiveTimerWindow::AddFoWObjectiveSet tracks) has reported done via
+    // GAME_SMSG_OBJECTIVE_DONE. fow_objectives_seen_done accumulates the ids seen this run; fow_completed
+    // latches true once it covers the whole set, and OnGameSrvTransfer then classifies the run
+    // "completed" (MVP vote) instead of "resign" (failure vote). Both reset every run start. A player
+    // who joined mid-run and missed an early packet just never latches this and falls back to
+    // ProcessSync's IsRunCompleted, exactly as for dhuum_completed.
+    std::unordered_set<uint32_t> fow_objectives_seen_done;
+    bool fow_completed = false;
 
     uint32_t last_written_utc_start = 0; // for DrawSettings status display only
 

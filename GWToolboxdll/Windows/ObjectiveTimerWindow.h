@@ -4,7 +4,8 @@
 #include <GWCA/GameContainers/GamePos.h>
 
 #include <ToolboxWindow.h>
-#include <optional>
+#include <Utils/ObjectiveTimerHistory.h>
+#include <future>
 #include <vector>
 
 #include <uWebsockets/App.h>
@@ -24,6 +25,8 @@ public:
 
     void Initialize() override;
     void Terminate() override;
+    void SignalTerminate() override;
+    bool CanTerminate() override;
 
     void Update(float delta) override;
     void Draw(IDirect3DDevice9* pDevice) override;
@@ -130,14 +133,7 @@ private:
         Objective* SetStarted();
         Objective* SetDone();
         Objective* AddChild(Objective* child);
-        struct Serialized {
-            std::string name;
-            uint32_t status = 0;
-            uint32_t start = 0;
-            uint32_t done = 0;
-            std::optional<uint32_t> indent;
-            std::optional<uint32_t> duration;
-        };
+        using Serialized = ObjectiveTimerHistory::Objective;
         static Objective* FromJson(const Serialized& json);
         Serialized ToJson();
 
@@ -160,6 +156,7 @@ private:
         ~ObjectiveSet();
 
         DWORD system_time;
+        std::string run_id;
         // Time point that this objective set was created in ms (i.e. run started)
         DWORD run_start_time_point = 0;
         DWORD duration = static_cast<DWORD>(-1);
@@ -209,13 +206,7 @@ private:
         // Renders as a single collapsed header row, so its height is known without drawing it.
         [[nodiscard]] bool IsCollapsedRow() const { return !drawn_expanded; }
         void StopObjectives();
-        struct Serialized {
-            std::string name;
-            uint32_t instance_start = 0;
-            uint32_t utc_start = 0;
-            std::vector<Objective::Serialized> objectives;
-            std::optional<uint32_t> duration;
-        };
+        using Serialized = ObjectiveTimerHistory::Run;
         static ObjectiveSet* FromJson(const Serialized& json);
         Serialized ToJson();
         void Update() const;
@@ -238,7 +229,15 @@ private:
         bool drawn_expanded = true;
     };
 
-    std::map<DWORD, ObjectiveSet*> objective_sets{};
+    std::future<ObjectiveTimerHistory::Result> history_task;
+    bool history_saving = false;
+    bool history_load_pending = false;
+    bool history_save_pending = false;
+    bool history_stopping = false;
+    std::chrono::steady_clock::time_point history_retry_at{};
+    void UpdateHistory();
+
+    std::map<std::pair<DWORD, std::string>, ObjectiveSet*> objective_sets{};
     // Newest-first view of objective_sets, rebuilt only when the map changes. Walking the map itself
     // every frame costs a global CRT lock per step under the debug CRT's checked iterators.
     std::vector<ObjectiveSet*> display_order{};

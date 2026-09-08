@@ -983,17 +983,20 @@ void GoToTargetAction::initialAction()
 {
     Action::initialAction();
 
-    target = GW::Agents::GetTargetAsAgentLiving();
+    started_at = std::chrono::steady_clock::now();
+    dialogHasPoppedUp = false;
+    const auto target = GW::Agents::GetTargetAsAgentLiving();
+    target_id = target ? target->agent_id : 0;
     if (!target || target->allegiance == GW::Constants::Allegiance::Enemy) return;
 
-    dialogHasPoppedUp = false;
-
-    auto result = gotoTargetDialogPoppedUp.insert({target->agent_id, std::vector{&dialogHasPoppedUp}});
+    auto result = gotoTargetDialogPoppedUp.insert({target_id, std::vector{&dialogHasPoppedUp}});
     if (!result.second) {
         result.first->second.push_back(&dialogHasPoppedUp);
     }
 
-    GW::GameThread::Enqueue([target = this->target] { GW::Agents::InteractAgent(target); });
+    GW::GameThread::Enqueue([id = target_id] {
+        if (const auto agent = GW::Agents::GetAgentByID(id)) GW::Agents::InteractAgent(agent);
+    });
 }
 void GoToTargetAction::finalAction()
 {
@@ -1001,11 +1004,19 @@ void GoToTargetAction::finalAction()
         std::erase(it->second, &dialogHasPoppedUp);
         it = it->second.empty() ? gotoTargetDialogPoppedUp.erase(it) : std::next(it);
     }
-    target = nullptr;
+    target_id = 0;
     Action::finalAction();
 }
 ActionStatus GoToTargetAction::isComplete() const
 {
+    if (finishCondition == GoToTargetFinishCondition::None) return ActionStatus::Complete;
+    const auto agent = GW::Agents::GetAgentByID(target_id);
+    const auto target = agent ? agent->GetAsAgentLiving() : nullptr;
+    if (!target || target->GetIsDead() || target->allegiance == GW::Constants::Allegiance::Enemy) return ActionStatus::Error;
+    if (std::chrono::steady_clock::now() - started_at >= std::chrono::seconds(60)) {
+        logMessage("Talk with NPC timed out waiting for movement or a dialog.");
+        return ActionStatus::Error;
+    }
     switch (finishCondition)
     {
         case GoToTargetFinishCondition::StoppedMovingNextToTarget:
@@ -1540,6 +1551,11 @@ ActionBehaviourFlags ConditionedAction::behaviour() const
     {
         if (action) flags &= action->behaviour();
     }
+    for (const auto& branch : actionsElseIf) {
+        for (const auto& action : branch.second) {
+            if (action) flags &= action->behaviour();
+        }
+    }
     return flags;
 }
 
@@ -1561,6 +1577,7 @@ void RepopMinipetAction::initialAction()
 
     agentHasSpawned = false;
     hasUsedItem = false;
+    started_at = std::chrono::steady_clock::now();
 
     auto result = repopMinipets.insert({agentModelId, std::vector{&agentHasSpawned}});
     if (!result.second) {
@@ -1580,6 +1597,11 @@ void RepopMinipetAction::finalAction()
 
 ActionStatus RepopMinipetAction::isComplete() const
 {
+    if (hasUsedItem && agentHasSpawned) return ActionStatus::Complete;
+    if (std::chrono::steady_clock::now() - started_at >= std::chrono::seconds(30)) {
+        logMessage("Repop minipet timed out waiting for the item cooldown or spawn event.");
+        return ActionStatus::Error;
+    }
     if (!hasUsedItem) {
         const auto& instanceInfo = InstanceInfo::getInstance();
         if (!instanceInfo.canPopAgent()) return ActionStatus::Running;
@@ -1587,9 +1609,11 @@ ActionStatus RepopMinipetAction::isComplete() const
         const auto item = FindMatchingItem(itemModelId);
         if (!item) return ActionStatus::Error;
         const auto needsToUnpop = instanceInfo.hasMinipetPopped();
-        GW::GameThread::Enqueue([needsToUnpop, item]() -> void {
-            if (needsToUnpop) GW::Items::UseItem(item);
-            GW::Items::UseItem(item);
+        GW::GameThread::Enqueue([needsToUnpop, id = item->item_id]() -> void {
+            if (const auto item = GW::Items::GetItemById(id)) {
+                if (needsToUnpop) GW::Items::UseItem(item);
+                GW::Items::UseItem(item);
+            }
         });
         hasUsedItem = true;
     }
@@ -2247,6 +2271,8 @@ SideWalk_pt SideWalk_Func = 0;
 void KeyboardMoveAction::initialAction()
 {
     Action::initialAction();
+    startedWalking = false;
+    started_at = std::chrono::steady_clock::now();
 
     const auto player = GW::Agents::GetControlledCharacter();
     if (!player || GW::GetDistance(player->pos, targetPosition) < 5.f) return;
@@ -2260,8 +2286,6 @@ void KeyboardMoveAction::initialAction()
     {
         return;
     }
-    startedWalking = false;
-
     GW::GameThread::Enqueue([playerPos = player->pos, direction = targetPosition - player->pos, movementDirection = movementDirection]() mutable {
         auto normalizedDirection = GW::Normalize(direction);
         const int forwardsFlag = movementDirection == MovementDirection::Backwards ? -1 : 0;
@@ -2274,6 +2298,13 @@ ActionStatus KeyboardMoveAction::isComplete() const
 {
     const auto player = GW::Agents::GetControlledCharacter();
     if (!player) return ActionStatus::Complete;
+    if (!startedWalking && !player->GetIsMoving() && GW::GetDistance(player->pos, targetPosition) < 5.f) return ActionStatus::Complete;
+    if (!SideWalk_Func) return ActionStatus::Error;
+    if (!startedWalking && !player->GetIsMoving()
+        && std::chrono::steady_clock::now() - started_at >= std::chrono::seconds(5)) {
+        logMessage("Keyboard movement timed out before the character started moving.");
+        return ActionStatus::Error;
+    }
 
     const auto isMoving = player->GetIsMoving();
     startedWalking |= isMoving;

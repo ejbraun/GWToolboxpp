@@ -64,17 +64,6 @@ namespace
     };
     MiniPetStatus minipetStatus;
 
-    std::string removeTextInBrackets(std::string str)
-    {
-        while (true)
-        {
-            const auto left = str.find('<');
-            if (left == std::string::npos) return str;
-            const auto right = str.find('>', left);
-            if (right == std::string::npos) return str;
-            str.erase(left, right + 1);
-        }
-    }
     std::string decode(const std::wstring& wstring) 
     {
         if (wstring.empty()) return "";
@@ -90,7 +79,7 @@ namespace
             return "";
         }
         if (entry.pending) return "";
-        return removeTextInBrackets(PluginUtils::WStringToString(entry.decoded));
+        return PluginUtils::WStringToString(entry.decoded);
     }
 
     std::optional<uint32_t> toInt(std::string str)

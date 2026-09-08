@@ -904,6 +904,42 @@ namespace GW {
 } // namespace GW
 
 namespace ToolboxUtils {
+    bool MatchesTargetFilter(const GW::Agent* agent, const GW::AgentTargetFlags filter)
+    {
+        if (!agent) return false;
+        if (agent->GetIsItemType()) return (filter & GW::AgentTargetFlags::Type_Item) != 0;
+        if (agent->GetIsGadgetType()) return (filter & GW::AgentTargetFlags::Type_Gadget) != 0;
+        const auto living = agent->GetAsAgentLiving();
+        if (!living) return false;
+        const auto living_filter = filter & ~(GW::Type_Item | GW::Type_Gadget);
+        const auto npc_filter = GW::TargetFilter::AnyLiving & ~GW::AgentTargetFlags::Accept_Player;
+        if (living_filter == GW::TargetFilter::AnyLiving || living_filter == npc_filter)
+            return !living->GetIsDead() && (living_filter != npc_filter || !living->IsPlayer());
+        if (living_filter == GW::Accept_Player) return living->IsPlayer();
+
+        GW::AgentTargetFlags include, exclude_dead, exclude_alive;
+        switch (living->allegiance) {
+            case GW::Constants::Allegiance::Ally_NonAttackable:
+                include = GW::Include_Ally; exclude_dead = GW::Exclude_DeadAlly; exclude_alive = GW::Exclude_AliveAlly; break;
+            case GW::Constants::Allegiance::Neutral:
+                include = GW::Include_Neutral; exclude_dead = GW::Exclude_DeadNeutral; exclude_alive = GW::Exclude_AliveNeutral; break;
+            case GW::Constants::Allegiance::Enemy:
+                include = GW::Include_Enemy; exclude_dead = GW::Exclude_DeadEnemy; exclude_alive = GW::Exclude_AliveEnemy; break;
+            case GW::Constants::Allegiance::Spirit_Pet:
+                include = GW::Include_SpiritPet; exclude_dead = GW::Exclude_DeadSpiritPet; exclude_alive = GW::Exclude_AliveSpiritPet; break;
+            case GW::Constants::Allegiance::Minion:
+                include = GW::Include_Minion; exclude_dead = GW::Exclude_DeadMinion; exclude_alive = GW::Exclude_AliveMinion; break;
+            case GW::Constants::Allegiance::Npc_Minipet:
+                include = GW::Include_NPCMinipet; exclude_dead = GW::Exclude_DeadNPCMinipet; exclude_alive = GW::Exclude_AliveNPCMinipet; break;
+            default:
+                return living_filter == (GW::TargetFilter::Any & ~(GW::Type_Item | GW::Type_Gadget));
+        }
+        // Hidden-agent flags must not override the category the user explicitly chose.
+        if (!(filter & include)) return false;
+        if ((filter & GW::Exclude_UsedCorpse) && living->GetIsUsedCorpse()) return false;
+        return !(filter & (living->GetIsDead() ? exclude_dead : exclude_alive));
+    }
+
     bool FrameRateCheck(clock_t& last_checked, clock_t fps)
     {
         const auto now = TIMER_INIT();

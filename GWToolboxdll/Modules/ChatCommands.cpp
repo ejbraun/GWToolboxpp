@@ -175,7 +175,7 @@ namespace {
 
         GW::Agent* closest = nullptr;
         for (const auto agent : *agents) {
-            if (agent == me || !GW::Agents::GetAgentMatchesFlags(agent, GW::TargetFilter::AnyLiving)) {
+            if (agent == me || !ToolboxUtils::MatchesTargetFilter(agent, GW::TargetFilter::AnyLiving)) {
                 continue;
             }
             const float this_distance = GetSquareDistance(me->pos, agent->pos);
@@ -214,7 +214,7 @@ namespace {
 
         const GW::Agent* closest = nullptr;
         for (const auto agent : *agents) {
-            if (agent == me || !GW::Agents::GetAgentMatchesFlags(agent, AgentEETargetType)) {
+            if (agent == me || !ToolboxUtils::MatchesTargetFilter(agent, AgentEETargetType)) {
                 continue;
             }
             const float this_distance = GetSquareDistance(me->pos, agent->pos);
@@ -821,17 +821,8 @@ namespace {
         for (const GW::Agent* agent : *agents) {
             if (!agent || agent == me) continue;
 
-            if (model_id) {
-                if (GetAgentModelId(agent) != model_id) continue;
-
-                const auto living = agent->GetAsAgentLiving();
-                if (type == GW::TargetFilter::AnyLiving || type == (GW::TargetFilter::AnyLiving & ~GW::AgentTargetFlags::Accept_Player)) {
-                    if (!living || living->GetIsDead()) continue;
-                }
-            }
-            else {
-                if (!GW::Agents::GetAgentMatchesFlags(agent, type)) continue;
-            }
+            if (model_id && GetAgentModelId(agent) != model_id) continue;
+            if (!ToolboxUtils::MatchesTargetFilter(agent, type)) continue;
 
             if (index == 0) {
                 const float new_distance = GetSquareDistance(me->pos, agent->pos);
@@ -2165,7 +2156,7 @@ void SearchAgent::Add(const wchar_t* _search, const GW::AgentTargetFlags type)
     if (!agents) return;
 
     for (const auto agent : *agents) {
-        if (!GW::Agents::GetAgentMatchesFlags(agent, type)) continue;
+        if (!ToolboxUtils::MatchesTargetFilter(agent, type)) continue;
         if (std::ranges::any_of(npc_names, [agent](const auto& n) { return n.first == agent->agent_id; })) {
             continue; // already queued for decoding by an earlier query
         }
@@ -2205,7 +2196,7 @@ void SearchAgent::Update()
         const auto name = TextUtils::ToLower(enc->wstring());
         // Match a term only against agents of the type it was queued with, so each /target type stays scoped.
         const auto matches = std::ranges::any_of(queries, [&](const Query& q) {
-            return name.find(q.search) != std::wstring::npos && GW::Agents::GetAgentMatchesFlags(agent, q.type);
+            return name.find(q.search) != std::wstring::npos && ToolboxUtils::MatchesTargetFilter(agent, q.type);
         });
         if (!matches) {
             continue;

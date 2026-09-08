@@ -73,9 +73,10 @@ bool SettingsDoc::LoadFolder(const std::filesystem::path& folder)
         const FilePersistence::ScopedConfigLock config_lock;
         if (!config_lock.Acquired()) return false;
         std::error_code ec;
-        const auto is_directory = std::filesystem::is_directory(folder, ec);
+        const auto folder_exists = std::filesystem::exists(folder, ec);
         if (ec) return false;
-        if (is_directory) {
+        if (folder_exists) {
+            if (!std::filesystem::is_directory(folder, ec) || ec) return false;
             for (std::filesystem::directory_iterator it(folder, ec), end; it != end && !ec; it.increment(ec)) {
                 const auto& entry = *it;
                 if (!entry.is_regular_file(ec)) {

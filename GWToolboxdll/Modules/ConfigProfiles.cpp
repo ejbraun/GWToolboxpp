@@ -780,7 +780,6 @@ namespace {
                 PendingAction action;
                 action.type = PendingActionType::LogoutSave;
                 action.profile = NormalizeProfile(Resources::GetSettingsFolderName());
-                action.character = active_character;
                 try {
                     GuildWarsSettingsModule::CaptureCurrentSettings(action.captured_guild_wars_settings, action.capture_warning);
                 }

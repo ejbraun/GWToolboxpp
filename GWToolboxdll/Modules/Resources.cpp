@@ -142,6 +142,7 @@ namespace {
     std::unordered_map<GW::Constants::HeroID, GuiUtils::EncString*> hero_names;
     std::unordered_map<GW::Constants::Language, std::unordered_map<uint32_t, std::unique_ptr<GuiUtils::EncString>>> encoded_string_ids;
     std::filesystem::path current_settings_folder;
+    std::recursive_mutex settings_folder_mutex;
     constexpr size_t MAX_WORKERS = 20;
     const wchar_t* GUILD_WARS_WIKI_FILES_PATH = L"img\\gww_files";
     const wchar_t* SKILL_IMAGES_PATH = L"img\\skills";
@@ -506,18 +507,21 @@ std::filesystem::path Resources::GetComputerFolderPath()
 
 std::filesystem::path Resources::GetSettingsFolderName()
 {
+    const std::scoped_lock lock(settings_folder_mutex);
     // Bare config name (no configs\ prefix) so it can be passed back to SetSettingsFolder
     return current_settings_folder.empty() ? std::filesystem::path() : current_settings_folder.filename();
 }
 
 std::filesystem::path Resources::GetSettingsFolderPath()
 {
+    const std::scoped_lock lock(settings_folder_mutex);
     const auto computer_path = GetComputerFolderPath();
     return current_settings_folder.empty() ? computer_path / L"configs" / L"default" : computer_path / current_settings_folder;
 }
 
 std::filesystem::path Resources::GetLegacySettingsFolderPath()
 {
+    const std::scoped_lock lock(settings_folder_mutex);
     // Pre-configs/default layout: the default config lived at the computer root
     const auto computer_path = GetComputerFolderPath();
     return current_settings_folder.empty() ? computer_path : computer_path / current_settings_folder;
@@ -525,13 +529,17 @@ std::filesystem::path Resources::GetLegacySettingsFolderPath()
 
 bool Resources::SetSettingsFolder(const std::filesystem::path& foldername)
 {
+    const std::scoped_lock lock(settings_folder_mutex);
+    const auto previous_settings_folder = current_settings_folder;
     if (foldername.empty()) {
         current_settings_folder.clear();
     }
     else {
         current_settings_folder = L"configs" / foldername;
     }
-    return EnsureFolderExists(GetSettingsFolderPath());
+    if (EnsureFolderExists(GetSettingsFolderPath())) return true;
+    current_settings_folder = previous_settings_folder;
+    return false;
 }
 
 std::filesystem::path Resources::GetSettingFile(const std::filesystem::path& file)

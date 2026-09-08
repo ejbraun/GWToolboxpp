@@ -13,11 +13,13 @@
 
 #include <Defender.h>
 #include <Modules/Resources.h>
+#include <Modules/GlobalSettings.h>
 #include <filesystem>
 #include <string>
 
 #include "GWCA/Managers/UIMgr.h"
 #include "Utils/TextUtils.h"
+#include <Modules/GWRL.h>
 
 namespace PluginMetadataJson { struct Manifest { uint32_t version = 0; std::string sha256; }; }
 
@@ -33,21 +35,30 @@ namespace {
     std::vector<PluginModule::Plugin*> plugins_available;
 
     std::vector<PluginModule::Plugin*> plugins_loaded;
+    std::vector<std::string> configured_plugin_names;
+    bool plugin_settings_dirty = false;
+    ULONGLONG plugin_settings_last_edit = 0;
 
     bool UnloadPlugin(PluginModule::Plugin* plugin_ptr, const bool preserve_enabled = false)
     {
         auto& plugin = *plugin_ptr;
         if (!preserve_enabled && !plugin.reserved) plugin.enabled = false;
-        if (!plugin.terminating) {
+        if (!plugin.dll && !plugin.instance && !plugin.released_module) return true;
+        plugin.terminating = true;
+        if (!std::ranges::contains(plugins_loaded, plugin_ptr)) plugins_loaded.push_back(plugin_ptr);
+        if (plugin.dll) {
+            const auto owner = reinterpret_cast<uintptr_t>(plugin.dll);
+            GWRL::Instance().CloseRoutes(owner);
+            if (!GWRL::Instance().RoutesDrained(owner)) return false;
+        }
+        if (!plugin.termination_signalled) {
             if (plugin.initialized && plugin.instance) {
                 plugin.instance->SaveSettings(pluginsfoldername.c_str());
                 plugin.instance->SignalTerminate();
             }
-            if (!plugin.dll && !plugin.instance && !plugin.released_module) return true;
-            if (!std::ranges::contains(plugins_loaded, plugin_ptr)) plugins_loaded.push_back(plugin_ptr);
             plugin.stop_barrier = std::make_shared<std::atomic_bool>(false);
             GW::GameThread::Enqueue([barrier = plugin.stop_barrier] { barrier->store(true); });
-            plugin.terminating = true;
+            plugin.termination_signalled = true;
         }
         if (!plugin.stop_barrier->load() || (plugin.instance && !plugin.instance->CanTerminate())) return false; // Pending
         if (plugin.instance && plugin.initialized) plugin.instance->Terminate();
@@ -65,7 +76,7 @@ namespace {
                 reinterpret_cast<LPCWSTR>(plugin.released_module), &still_loaded)) return false;
             plugin.released_module = nullptr;
         }
-        plugin.terminating = false;
+        plugin.terminating = plugin.termination_signalled = false;
         plugin.stop_barrier.reset();
         std::erase(plugins_loaded, plugin_ptr);
         return true;
@@ -151,6 +162,7 @@ namespace {
         }
         ImGuiAllocFns fns;
         ImGui::GetAllocatorFunctions(&fns.alloc_func, &fns.free_func, &fns.user_data);
+        GWRL::Instance().OpenRoutes(reinterpret_cast<uintptr_t>(plugin.dll));
         plugin.instance->Initialize(context, fns, GWToolbox::GetDLLModule());
         plugin.instance->LoadSettings(pluginsfoldername.c_str());
         plugin.initialized = true;
@@ -182,8 +194,16 @@ namespace {
                     return plugin->path == file_path;
                 });
                 if (found == plugins_available.end()) {
-                    plugins_available.push_back(new PluginModule::Plugin(file_path));
+                    const auto plugin = new PluginModule::Plugin(file_path);
+                    plugin->enabled = std::ranges::contains(configured_plugin_names, file_path.filename().string());
+                    plugins_available.push_back(plugin);
                 }
+            }
+        }
+        if (!update_reserved) {
+            for (const auto plugin : plugins_available) {
+                plugin->enabled = std::ranges::contains(configured_plugin_names, plugin->path.filename().string());
+                if (plugin->enabled && !plugin->instance && LoadPlugin(plugin)) InitializePlugin(plugin);
             }
         }
     }
@@ -191,69 +211,84 @@ namespace {
 
 void PluginModule::DrawSettingsInternal()
 {
-    std::scoped_lock lock(plugin_mutex);
-    ImGui::PushID("Plugins");
+    auto save_plugins = false;
+    {
+        std::scoped_lock lock(plugin_mutex);
+        ImGui::PushID("Plugins");
 
-    size_t i = 0;
-    for (const auto plugin : plugins_available) {
-        ImGui::PushID(i++);
-        auto& style = ImGui::GetStyle();
-        const auto origin_header_col = style.Colors[ImGuiCol_Header];
-        style.Colors[ImGuiCol_Header] = {0, 0, 0, 0};
+        size_t i = 0;
+        for (const auto plugin : plugins_available) {
+            ImGui::PushID(i++);
+            auto& style = ImGui::GetStyle();
+            const auto origin_header_col = style.Colors[ImGuiCol_Header];
+            style.Colors[ImGuiCol_Header] = {0, 0, 0, 0};
 
-        static char buf[128];
-        const auto has_settings = !plugin->terminating && plugin->initialized && plugin->instance && plugin->instance->HasSettings();
-        if (has_settings) {
-            sprintf(buf, "      %s", plugin->path.filename().string().c_str());
-        }
-        else {
-            sprintf(buf, "             %s", plugin->path.filename().string().c_str());
-        }
-        const auto pos = ImGui::GetCursorScreenPos();
-        const bool is_showing = has_settings ? ImGui::CollapsingHeader(buf, ImGuiTreeNodeFlags_AllowOverlap) : ImGui::CollapsingHeader(buf, ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_AllowOverlap);
-
-        if (const auto icon = plugin->initialized && !plugin->terminating ? plugin->instance->Icon() : nullptr) {
-            const float text_offset_x = ImGui::GetTextLineHeightWithSpacing() + 4.0f; // TODO: find a proper number
-            ImGui::GetWindowDrawList()->AddText(
-                ImVec2(pos.x + text_offset_x, pos.y + style.ItemSpacing.y / 2),
-                ImColor(style.Colors[ImGuiCol_Text]), icon);
-        }
-
-        style.Colors[ImGuiCol_Header] = origin_header_col;
-
-        ImGui::SameLine(ImGui::GetContentRegionAvail().x - ImGui::GetTextLineHeight() - ImGui::GetStyle().FramePadding.x - 128.f);
-        snprintf(buf, _countof(buf), "%s###load_unload", plugin->instance ? "Unload" : "Load");
-        ImGui::BeginDisabled(update_reserved || plugin->terminating);
-        if (ImGui::Button(buf)) {
-            if (!plugin->instance || plugin->terminating || !plugin->initialized) {
-                LoadPlugin(plugin);
+            static char buf[128];
+            const auto has_settings = !plugin->terminating && plugin->initialized && plugin->instance && plugin->instance->HasSettings();
+            if (has_settings) {
+                sprintf(buf, "      %s", plugin->path.filename().string().c_str());
             }
             else {
-                UnloadPlugin(plugin);
+                sprintf(buf, "             %s", plugin->path.filename().string().c_str());
             }
-        }
-        ImGui::EndDisabled();
-        if (plugin->version) { ImGui::SameLine(); ImGui::TextDisabled("v%u", plugin->version); }
-        if (plugin->instance && !plugin->terminating && plugin->instance->GetVisiblePtr()) {
-            ImGui::SameLine(ImGui::GetContentRegionAvail().x - ImGui::GetTextLineHeight() - ImGui::GetStyle().FramePadding.x);
-            ImGui::Checkbox("##check", plugin->instance->GetVisiblePtr());
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Visible");
+            const auto pos = ImGui::GetCursorScreenPos();
+            const bool is_showing = has_settings ? ImGui::CollapsingHeader(buf, ImGuiTreeNodeFlags_AllowOverlap) : ImGui::CollapsingHeader(buf, ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_AllowOverlap);
+
+            if (const auto icon = plugin->initialized && !plugin->terminating ? plugin->instance->Icon() : nullptr) {
+                const float text_offset_x = ImGui::GetTextLineHeightWithSpacing() + 4.0f; // TODO: find a proper number
+                ImGui::GetWindowDrawList()->AddText(
+                    ImVec2(pos.x + text_offset_x, pos.y + style.ItemSpacing.y / 2),
+                    ImColor(style.Colors[ImGuiCol_Text]), icon);
             }
+
+            style.Colors[ImGuiCol_Header] = origin_header_col;
+
+            ImGui::SameLine(ImGui::GetContentRegionAvail().x - ImGui::GetTextLineHeight() - ImGui::GetStyle().FramePadding.x - 128.f);
+            snprintf(buf, _countof(buf), "%s###load_unload", plugin->instance ? "Unload" : "Load");
+            ImGui::BeginDisabled(update_reserved || plugin->terminating);
+            if (ImGui::Button(buf)) {
+                if (!plugin->instance || plugin->terminating || !plugin->initialized) {
+                    const auto filename = plugin->path.filename().string();
+                    if (!std::ranges::contains(configured_plugin_names, filename)) configured_plugin_names.push_back(filename);
+                    LoadPlugin(plugin);
+                }
+                else {
+                    std::erase(configured_plugin_names, plugin->path.filename().string());
+                    UnloadPlugin(plugin);
+                }
+                save_plugins = true;
+            }
+            ImGui::EndDisabled();
+            if (plugin->version) { ImGui::SameLine(); ImGui::TextDisabled("v%u", plugin->version); }
+            if (plugin->instance && !plugin->terminating && plugin->instance->GetVisiblePtr()) {
+                ImGui::SameLine(ImGui::GetContentRegionAvail().x - ImGui::GetTextLineHeight() - ImGui::GetStyle().FramePadding.x);
+                save_plugins |= ImGui::Checkbox("##check", plugin->instance->GetVisiblePtr());
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Visible");
+                }
+            }
+
+            if (is_showing && InitializePlugin(plugin) && has_settings) {
+                plugin->instance->DrawSettings();
+                if (ImGui::IsAnyItemActive()) {
+                    plugin_settings_dirty = true;
+                    plugin_settings_last_edit = GetTickCount64();
+                }
+            }
+            ImGui::PopID();
+            ImGui::Separator();
         }
 
-        if (is_showing && InitializePlugin(plugin) && has_settings) {
-            plugin->instance->DrawSettings();
+        if (ImGui::Button("Refresh")) {
+            RefreshDlls();
         }
+
         ImGui::PopID();
-        ImGui::Separator();
     }
-
-    if (ImGui::Button("Refresh")) {
-        RefreshDlls();
+    if (save_plugins) {
+        std::string error;
+        if (!GlobalSettings::SavePlugins(&error)) Log::Error("Unable to save global plugin settings: %s", error.c_str());
     }
-
-    ImGui::PopID();
 }
 
 bool PluginModule::CanTerminate()
@@ -308,6 +343,8 @@ void PluginModule::Initialize()
     std::scoped_lock lock(plugin_mutex);
     startup_settings_loaded = false;
     startup_plugins.clear();
+    configured_plugin_names.clear();
+    plugin_settings_dirty = false;
     pluginsfoldername = Resources::GetPath(L"plugins");
     ToolboxUIElement::Initialize();
     RefreshDlls();
@@ -315,27 +352,50 @@ void PluginModule::Initialize()
 
 void PluginModule::Draw(IDirect3DDevice9* device)
 {
-    std::scoped_lock lock(plugin_mutex);
-    for (const auto plugin : plugins_loaded) {
-        if (!InitializePlugin(plugin)) {
-            continue;
-        }
-        if (GW::UI::GetIsWorldMapShowing() && !plugin->instance->ShowOnWorldMap()) {
-            continue;
-        }
+    auto save_plugins = false;
+    {
+        std::scoped_lock lock(plugin_mutex);
+        for (const auto plugin : plugins_loaded) {
+            if (!InitializePlugin(plugin)) {
+                continue;
+            }
+            if (GW::UI::GetIsWorldMapShowing() && !plugin->instance->ShowOnWorldMap()) {
+                continue;
+            }
 
-        if (const auto visibility = plugin->instance->GetVisiblePtr(); !visibility || *visibility) {
-            plugin->instance->Draw(device);
+            if (const auto visibility = plugin->instance->GetVisiblePtr(); !visibility || *visibility) {
+                plugin->instance->Draw(device);
+            }
         }
+        if (plugin_settings_dirty && !ImGui::IsAnyItemActive() && GetTickCount64() - plugin_settings_last_edit >= 500) {
+            plugin_settings_dirty = false;
+            save_plugins = true;
+        }
+    }
+    if (save_plugins) {
+        std::string error;
+        if (!GlobalSettings::SavePlugins(&error)) Log::Error("Unable to save global plugin settings: %s", error.c_str());
     }
 }
 
 void PluginModule::LoadSettings(SettingsDoc& doc, ToolboxIni* legacy)
 {
-    std::scoped_lock lock(plugin_mutex);
-    ToolboxUIElement::LoadSettings(doc, legacy);
+    {
+        const std::scoped_lock lock(plugin_mutex);
+        ToolboxUIElement::LoadSettings(doc, legacy);
+    }
+    std::string error;
+    if (!GlobalSettings::EnsurePluginsLoaded(doc, legacy, &error)) Log::Warning("Unable to load global plugin settings: %s", error.c_str());
+}
+
+bool PluginModule::LoadGlobalSettings(SettingsDoc& doc, ToolboxIni* legacy)
+{
+    const std::scoped_lock lock(plugin_mutex);
+    if (update_reserved) return false;
     std::vector<std::string> enabled_plugins;
-    if (!doc.Get(Name(), "enabled_plugins", enabled_plugins) && legacy) {
+    const auto has_json = doc.Has(Name(), "enabled_plugins");
+    if (has_json && !doc.Get(Name(), "enabled_plugins", enabled_plugins)) return false;
+    if (!has_json && legacy) {
         TNamesDepend dlls_to_load;
         if (legacy->GetAllKeys(plugins_enabled_section, dlls_to_load)) {
             for (const auto& entry : dlls_to_load) {
@@ -343,7 +403,11 @@ void PluginModule::LoadSettings(SettingsDoc& doc, ToolboxIni* legacy)
             }
         }
     }
-    if (update_reserved) return;
+    configured_plugin_names.clear();
+    for (const auto& entry : enabled_plugins) {
+        const auto filename = std::filesystem::path(entry).filename().string();
+        if (!filename.empty() && !std::ranges::contains(configured_plugin_names, filename)) configured_plugin_names.push_back(filename);
+    }
     const auto startup = !startup_settings_loaded;
     startup_settings_loaded = true;
     for (const auto plugin : plugins_available) plugin->enabled = false;
@@ -370,18 +434,23 @@ void PluginModule::LoadSettings(SettingsDoc& doc, ToolboxIni* legacy)
     for (const auto plugin : std::views::reverse(to_unload)) {
         UnloadPlugin(plugin);
     }
+    return true;
 }
 
 void PluginModule::SaveSettings(SettingsDoc& doc)
 {
     std::scoped_lock lock(plugin_mutex);
     ToolboxUIElement::SaveSettings(doc);
-    std::vector<std::string> enabled_plugins;
+}
+
+void PluginModule::SaveGlobalSettings(SettingsDoc& doc)
+{
+    const std::scoped_lock lock(plugin_mutex);
     for (const auto plugin : plugins_available) {
         if (plugin->initialized && plugin->instance && !plugin->terminating) plugin->instance->SaveSettings(pluginsfoldername.c_str());
-        if (plugin->enabled) enabled_plugins.push_back(plugin->path.filename().string());
     }
-    doc.Set(Name(), "enabled_plugins", enabled_plugins);
+    std::ranges::sort(configured_plugin_names);
+    doc.Set(Name(), "enabled_plugins", configured_plugin_names);
 }
 
 void PluginModule::Update(const float delta)
@@ -390,7 +459,7 @@ void PluginModule::Update(const float delta)
     // Unloading changes plugins_loaded; iterate a snapshot instead of breaking and skipping a frame.
     for (const auto plugin : std::vector(plugins_loaded)) {
         if (plugin->terminating) {
-            if (UnloadPlugin(plugin, true)) continue;
+            if (UnloadPlugin(plugin, true) || !plugin->termination_signalled) continue;
         }
         if (plugin->initialized && plugin->instance) plugin->instance->Update(delta);
     }
@@ -420,19 +489,24 @@ void PluginModule::SignalTerminate()
 
 void PluginModule::Terminate()
 {
-    std::scoped_lock lock(plugin_mutex);
-    ASSERT(plugins_loaded.empty());
-    for (const auto p : plugins_available) {
-        if (p->dll) {
-            FreeLibrary(p->dll);
+    {
+        std::scoped_lock lock(plugin_mutex);
+        ASSERT(plugins_loaded.empty());
+        for (const auto p : plugins_available) {
+            if (p->dll) {
+                FreeLibrary(p->dll);
+            }
+            delete p;
         }
-        delete p;
+        plugins_available.clear();
+        plugins_loaded.clear();
+        startup_plugins.clear();
+        startup_settings_loaded = false;
+        ToolboxUIElement::Terminate();
+        configured_plugin_names.clear();
+        plugin_settings_dirty = false;
     }
-    plugins_available.clear();
-    plugins_loaded.clear();
-    startup_plugins.clear();
-    startup_settings_loaded = false;
-    ToolboxUIElement::Terminate();
+    GlobalSettings::InvalidatePlugins();
 }
 
 std::vector<Gwrl::Artifact> PluginModule::Inventory(const bool refresh)

@@ -191,6 +191,7 @@ find_path(GAME_SDK_INCLUDE discord-game-sdk/discord.h)
 find_path(EARCUT_HPP_INCLUDE_DIRS "mapbox/earcut.hpp")
 find_package(minhook CONFIG REQUIRED)
 find_package(glaze CONFIG REQUIRED)
+add_subdirectory(Dependencies/GWRL)
 find_package(ctre CONFIG REQUIRED)
 find_package(directxtex CONFIG REQUIRED)
 

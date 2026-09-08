@@ -12,6 +12,8 @@ GWRLauncher manages installation and updates for artifacts supported by its back
 
 DBBox reports its integer version in the plugin list and Windows file properties. Existing plugins without version metadata can still load under their existing interface.
 
+The enabled plugin list and plugin-owned settings are computer-global rather than profile-specific. Enabling or disabling a plugin updates the global selection immediately; `/tb global save` and `/tb global load` provide explicit control without affecting the active config profile.
+
 ## DBBox features
 
 Expand DBBox to enable or disable individual features. Each has its own instance, settings and shutdown lifecycle. **Stopping...** means pending work is draining. Visibility hides a feature's UI without disabling it.

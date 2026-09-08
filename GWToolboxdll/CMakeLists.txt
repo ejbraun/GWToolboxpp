@@ -301,6 +301,7 @@ target_link_libraries(GWToolboxdll PRIVATE
     easywsclient
     ${CPP_GAME_SDK}
     glaze::glaze
+    GWRL::Core
     imgui::fonts
     IconFontCppHeaders
     nativefiledialog

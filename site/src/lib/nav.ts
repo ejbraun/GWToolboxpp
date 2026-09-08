@@ -86,6 +86,7 @@ export const navGroups: NavGroup[] = [
       { slug: 'pits_souls', label: 'DBBox Pits and Souls' },
       { slug: 'gwrl', label: 'GWRL Updates' },
       { slug: 'gwrl_protocol', label: 'GWRL Protocol' },
+      { slug: 'gwrl_routing', label: 'GWRL Module Routing' },
       { slug: 'fork_releases', label: 'Fork Releases' },
     ],
   },

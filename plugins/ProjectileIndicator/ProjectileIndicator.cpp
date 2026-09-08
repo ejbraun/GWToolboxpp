@@ -74,7 +74,7 @@ void ProjectileIndicator::OnSkillNameDecoded(void* context, const wchar_t* decod
 void ProjectileIndicator::CompleteSkillNameDecode(SkillNameDecodeContext* context, const wchar_t* decoded)
 {
     if (!terminating && decoded) {
-        decodedSkillNames[context->id] = decoded;
+        decodedSkillNames[context->id] = PluginUtils::StripTags(decoded);
     }
     std::erase(pendingSkillNameDecodes, context);
     delete context;

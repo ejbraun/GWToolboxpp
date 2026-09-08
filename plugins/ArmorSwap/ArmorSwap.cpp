@@ -740,7 +740,7 @@ namespace ArmorSwap {
             [](const AvailableItem& available) { return available.configured.item_id; });
         if (found == available_items_.end()) return;
         found->decoded_name = decoded && decoded[0]
-            ? WideToUtf8(decoded)
+            ? WideToUtf8(PluginUtils::StripTags(decoded))
             : found->configured.label;
     }
 

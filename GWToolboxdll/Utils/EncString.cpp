@@ -22,7 +22,7 @@ EncString* EncString::reset(const uint32_t enc_string_id, const bool sanitise)
 {
     if (enc_string_id && encoded_ws.length()) {
         const uint32_t this_id = GW::UI::EncStrToUInt32(encoded_ws.c_str());
-        if (this_id == enc_string_id) {
+        if (this_id == enc_string_id && sanitise_enabled == sanitise) {
             return this;
         }
     }
@@ -47,23 +47,24 @@ EncString* EncString::language(const GW::Constants::Language l)
     decoded_ws.clear();
     decoded_s.clear();
     decoded = false;
+    sanitised = !sanitise_enabled;
     return this;
 }
 
 EncString* EncString::reset(const wchar_t* enc_string, const bool sanitise)
 {
-    if (enc_string && wcscmp(enc_string, encoded_ws.c_str()) == 0) {
+    if (enc_string && wcscmp(enc_string, encoded_ws.c_str()) == 0 && sanitise_enabled == sanitise) {
         return this;
     }
     AbandonDecode();
+    const auto encoded_copy = enc_string ? std::wstring(enc_string) : std::wstring{};
     encoded_ws.clear();
     decoded_ws.clear();
     decoded_s.clear();
     decoded = false;
-    sanitised = !sanitise;
-    if (enc_string) {
-        encoded_ws = enc_string;
-    }
+    sanitise_enabled = sanitise;
+    sanitised = !sanitise_enabled;
+    encoded_ws = encoded_copy;
     return this;
 }
 
@@ -134,7 +135,7 @@ std::string& EncString::string()
 }
 
 EncString::EncString(EncString&& other) noexcept
-    : encoded_ws(std::move(other.encoded_ws)), decoded_ws(std::move(other.decoded_ws)), decoded_s(std::move(other.decoded_s)), decoding(other.decoding), decoded(other.decoded), sanitised(other.sanitised), sanitise_cb(std::move(other.sanitise_cb)),
+    : encoded_ws(std::move(other.encoded_ws)), decoded_ws(std::move(other.decoded_ws)), decoded_s(std::move(other.decoded_s)), decoding(other.decoding), decoded(other.decoded), sanitised(other.sanitised), sanitise_enabled(other.sanitise_enabled), sanitise_cb(std::move(other.sanitise_cb)),
       language_id(other.language_id), pending_ctx_(other.pending_ctx_)
 {
     // Retarget the in-flight decode context to our new address
@@ -164,6 +165,7 @@ EncString& EncString::operator=(EncString&& other) noexcept
     decoding = other.decoding;
     decoded = other.decoded;
     sanitised = other.sanitised;
+    sanitise_enabled = other.sanitise_enabled;
     sanitise_cb = std::move(other.sanitise_cb);
     language_id = other.language_id;
     pending_ctx_ = other.pending_ctx_;

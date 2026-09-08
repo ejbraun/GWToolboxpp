@@ -1,4 +1,5 @@
 #include "AsyncStringDecoder.h"
+#include "PluginUtils.h"
 
 #include <GWCA/Managers/UIMgr.h>
 
@@ -17,7 +18,8 @@ namespace {
     {
         const auto context = static_cast<DecodeContext*>(rawContext);
         try {
-            context->completion(decoded);
+            const auto text = PluginUtils::StripTags(decoded ? decoded : L"");
+            context->completion(decoded ? text.c_str() : nullptr);
         }
         catch (...) {
             // Completion failures must not strand plugin shutdown.

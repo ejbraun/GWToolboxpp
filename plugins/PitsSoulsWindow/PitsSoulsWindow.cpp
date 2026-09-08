@@ -1,4 +1,5 @@
 #include "PitsSoulsWindow.h"
+#include <AsyncStringDecoder.h>
 
 #include <GWCA/Constants/Constants.h>
 #include <GWCA/GameContainers/Array.h>
@@ -90,8 +91,37 @@ void PitsSoulsWindow::PitsSoul::update(const Clock::time_point now)
     }
 }
 
+bool PitsSoulsWindow::isChainedSoul(const GW::AgentLiving& agent)
+{
+    const auto encoded = GW::Agents::GetAgentEncName(agent.agent_id);
+    if (!encoded || !*encoded) return false;
+    const auto key = std::wstring(encoded);
+    auto found = decoded_names.find(key);
+    if (found != decoded_names.end() && found->second->result == DecodedName::Result::Failed
+        && Clock::now() >= found->second->retry_after) {
+        decoded_names.erase(found);
+        found = decoded_names.end();
+    }
+    if (found == decoded_names.end()) {
+        constexpr auto maximum_cached_names = size_t{128};
+        if (decoded_names.size() >= maximum_cached_names) {
+            std::erase_if(decoded_names, [](const auto& entry) { return entry.second->result != DecodedName::Result::Pending; });
+        }
+        if (decoded_names.size() >= maximum_cached_names) return false;
+        const auto state = std::make_shared<DecodedName>();
+        found = decoded_names.emplace(key, state).first;
+        // Only owned decode state survives a map change or unload; no agent or plugin pointers escape.
+        AsyncStringDecoder::Decode(key, [state](const wchar_t* decoded) {
+            state->result = !decoded || !*decoded ? DecodedName::Result::Failed
+                : _wcsicmp(decoded, L"Chained Soul") == 0 ? DecodedName::Result::ChainedSoul : DecodedName::Result::Other;
+        }, GW::Constants::Language::English);
+    }
+    return found->second->result == DecodedName::Result::ChainedSoul;
+}
+
 void PitsSoulsWindow::resetSouls()
 {
+    decoded_names.clear();
     souls = {{
         {.pos = {11427.f, 5079.f}, .name = "Bottom"},
         {.pos = {9245.f, 4898.f}, .name = "Double"},
@@ -150,9 +180,9 @@ void PitsSoulsWindow::Update(const float delay)
     if (valid_agents) {
         for (const auto agent : *agents) {
             const auto living = agent ? agent->GetAsAgentLiving() : nullptr;
-            if (!living || living->IsPlayer() || living->player_number != GW::Constants::ModelID::UW::ChainedSoul) continue;
+            if (!living || living->IsPlayer()) continue;
             const auto soul = findSoul(living->pos);
-            if (!soul) continue;
+            if (!soul || !isChainedSoul(*living)) continue;
             auto& candidate = candidates[static_cast<size_t>(soul - souls.data())];
             if (!candidate || (candidate->GetIsDead() && !living->GetIsDead())
                 || (candidate->GetIsDead() == living->GetIsDead()
@@ -169,7 +199,7 @@ void PitsSoulsWindow::Update(const float delay)
         const auto bound_entry = soul.agent_id && valid_agents ? agents->get(soul.agent_id) : nullptr;
         if (bound_entry && *bound_entry) {
             const auto bound = (*bound_entry)->GetAsAgentLiving();
-            if (!bound || bound->IsPlayer() || bound->player_number != GW::Constants::ModelID::UW::ChainedSoul)
+            if (!bound || bound->IsPlayer() || !isChainedSoul(*bound))
                 bindSoul(soul, 0);
         }
         const auto living = candidates[i];
@@ -241,10 +271,12 @@ void PitsSoulsWindow::Initialize(ImGuiContext* ctx, ImGuiAllocFns fns, HMODULE t
     GW::StoC::RegisterPacketCallback<GW::Packet::StoC::AgentAdd>(
         &spawn_hook, [this](GW::HookStatus*, const auto* packet) {
             const std::scoped_lock lock(state_mutex);
-            if (terminating || !underworld_instance || !packet || !packet->agent_id
-                || (packet->agent_type & 0xF0000000) != 0x20000000
-                || (packet->agent_type & 0xFFFFFF) != GW::Constants::ModelID::UW::ChainedSoul) return;
-            if (const auto soul = findSoul(packet->position)) bindSoul(*soul, packet->agent_id);
+            if (terminating || !underworld_instance || !packet || !packet->agent_id) return;
+            const auto soul = findSoul(packet->position);
+            if (!soul) return;
+            const auto agent = GW::Agents::GetAgentByID(packet->agent_id);
+            const auto living = agent ? agent->GetAsAgentLiving() : nullptr;
+            if (living && !living->IsPlayer() && isChainedSoul(*living)) bindSoul(*soul, living->agent_id);
         }, 0x8000);
     GW::StoC::RegisterPacketCallback<GW::Packet::StoC::AgentRemove>(
         &despawn_hook, [this](GW::HookStatus*, const auto* packet) {
@@ -290,4 +322,9 @@ void PitsSoulsWindow::SignalTerminate()
         resetSouls();
     }
     ToolboxUIPlugin::SignalTerminate();
+}
+
+bool PitsSoulsWindow::CanTerminate()
+{
+    return AsyncStringDecoder::PendingCount() == 0 && ToolboxUIPlugin::CanTerminate();
 }

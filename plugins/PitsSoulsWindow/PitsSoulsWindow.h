@@ -7,9 +7,14 @@
 #include <GWCA/Utilities/Hook.h>
 
 #include <array>
+#include <atomic>
+#include <memory>
+#include <unordered_map>
 #include <chrono>
 #include <mutex>
 #include <optional>
+
+namespace GW { struct AgentLiving; }
 
 class PitsSoulsWindow : public ToolboxUIPlugin {
 public:
@@ -28,6 +33,7 @@ public:
 
     void Initialize(ImGuiContext* ctx, ImGuiAllocFns fns, HMODULE toolbox_dll) override;
     void SignalTerminate() override;
+    bool CanTerminate() override;
 
 private:
     using Clock = std::chrono::steady_clock;
@@ -48,12 +54,20 @@ private:
         std::string print() const;
     };
 
+    struct DecodedName {
+        enum class Result { Pending, ChainedSoul, Other, Failed };
+        std::atomic<Result> result = Result::Pending;
+        Clock::time_point retry_after = Clock::now() + std::chrono::seconds(1);
+    };
+
+    bool isChainedSoul(const GW::AgentLiving& agent);
     void resetSouls();
     PitsSoul* findSoul(GW::Vec2f pos);
     void bindSoul(PitsSoul& soul, uint32_t agent_id);
 
     std::mutex state_mutex;
     std::array<PitsSoul, 3> souls{};
+    std::unordered_map<std::wstring, std::shared_ptr<DecodedName>> decoded_names;
     bool underworld_instance = false;
     bool terminating = false;
     uint32_t last_instance_time = 0;

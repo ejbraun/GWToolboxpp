@@ -6,6 +6,8 @@ section: features
 
 Enable **Pits and Souls** inside [DBBox](/docs/plugins/). The window tracks the Chained Souls near the **Bottom**, **Double** and **Reaper** locations in the Underworld and estimates when they will die or respawn.
 
+Souls are identified by the decoded English name **Chained Soul**, with formatting tags removed. Identification works with other client languages and does not depend on a fixed model ID. Name decoding can take a moment; pending results from an earlier map or an unloaded feature are discarded.
+
 Move within compass range of a soul to begin tracking. Once a health sample or death event has been received, estimates continue after leaving range. The feature retains its existing timing model: 103.6 seconds of life from full health and 120 seconds between death and respawn. These are estimates; new health values and death events correct the timing.
 
 ## When the window says Unknown

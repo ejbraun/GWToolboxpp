@@ -5,6 +5,7 @@
 #include <cstring>
 #include <memory>
 #include <algorithm>
+#include <utility>
 
 namespace Gwrl {
     uint64_t ProcessStarted(const HANDLE process)
@@ -160,7 +161,8 @@ namespace Gwrl {
         if (message.empty() || message.size() > MaximumPayload) return Delivery::Oversized;
         const auto module_count = std::ranges::count_if(outgoing_, [](const auto& frame) { return frame.registration != 0; });
         const auto route_count = std::ranges::count(outgoing_, registration, &OutgoingFrame::registration);
-        if (!registration || outgoing_.size() >= MaximumQueue || module_count >= MaximumModuleQueue || route_count >= MaximumRouteQueue)
+        if (!registration || outgoing_.size() >= MaximumQueue
+            || std::cmp_greater_equal(module_count, MaximumModuleQueue) || std::cmp_greater_equal(route_count, MaximumRouteQueue))
             return Delivery::QueueFull;
         outgoing_.push_back({std::move(message), registration, 0});
         ++pending_writes_;
@@ -278,8 +280,8 @@ namespace Gwrl {
                 if (incoming_.size() >= MaximumQueue) break;
                 if (!recipient.empty() && recipient != "gwrl") {
                     const auto modules = std::ranges::count_if(incoming_, [](const auto& item) { return !item.recipient.empty() && item.recipient != "gwrl"; });
-                    if (modules >= MaximumModuleQueue
-                        || std::ranges::count(incoming_, recipient, &ReceivedFrame::recipient) >= MaximumRouteQueue) break;
+                    if (std::cmp_greater_equal(modules, MaximumModuleQueue)
+                        || std::cmp_greater_equal(std::ranges::count(incoming_, recipient, &ReceivedFrame::recipient), MaximumRouteQueue)) break;
                 }
                 incoming_.push_back({std::move(json), generation_.load(), recipient});
             }

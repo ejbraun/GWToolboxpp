@@ -277,9 +277,9 @@ namespace Gwrl {
             if (!online || !transport.Connected() || transport.Generation() != generation) return GWRL_DISCONNECTED;
             const auto& route = *found->second;
             if (!enabled || !route.selection) return GWRL_NOT_NEGOTIATED;
-            if (result && std::ranges::count_if(requests, [&](const auto& item) {
+            if (result && std::cmp_greater_equal(std::ranges::count_if(requests, [&](const auto& item) {
                 return item.second.registration == registration && !item.second.incoming;
-            }) + std::ranges::count_if(route.pending, [](const auto& work) { return work.message.kind == "response"; }) >= MaximumRouteQueue) return GWRL_QUEUE_FULL;
+            }) + std::ranges::count_if(route.pending, [](const auto& work) { return work.message.kind == "response"; }), MaximumRouteQueue)) return GWRL_QUEUE_FULL;
             auto message = Message(Copy(type));
             const auto request = result ? ++serial : 0;
             message.recipient = route.descriptor.recipient;
@@ -520,7 +520,7 @@ namespace Gwrl {
         auto& route = *found->second;
         if (route.selection->route_version != envelope.route_version) { self.Error(envelope, "unsupported_route_version"); return Routed::Handled; }
         if (route.selection->route_session != envelope.route_session) { self.Error(envelope, "stale_route_session"); return Routed::Handled; }
-        if (!response && (std::ranges::count_if(route.pending, [](const auto& work) { return work.message.kind != "response"; }) >= MaximumRouteQueue
+        if (!response && (std::cmp_greater_equal(std::ranges::count_if(route.pending, [](const auto& work) { return work.message.kind != "response"; }), MaximumRouteQueue)
             || self.Queued() >= MaximumDispatch)) {
             self.Error(envelope, "route_busy"); return Routed::Handled;
         }

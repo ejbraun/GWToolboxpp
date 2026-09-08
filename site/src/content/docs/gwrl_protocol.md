@@ -6,6 +6,8 @@ section: features
 
 # GWRL communication protocol v1
 
+The optional [module routing extension](/docs/gwrl_routing/) adds registered message destinations while preserving this update contract. GWRL itself remains unversioned within the host payload.
+
 Status: **Toolbox implementation included; launcher integration required.** The bridge implements the finalized `normal_lifecycle_v1` contract below. The launcher must implement this contract and complete live-client integration testing before enabling coordinated updates.
 
 Transport/envelope version remains 1.0. The required capability `normal_lifecycle_v1` distinguishes these semantics from the earlier bridge; `cooperative_update_v1` alone is insufficient. A controller must not attempt this lifecycle with a peer that does not advertise it. The wire contract below is shared by both implementations.

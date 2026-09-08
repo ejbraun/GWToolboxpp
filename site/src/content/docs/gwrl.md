@@ -27,3 +27,7 @@ DBBox starts at integer revision **1**, including Windows FileVersion and Produc
 This fork attempts to write crash dumps with plugins loaded and on older versions. Dumps include cached plugin names, known versions/hashes, active DBBox feature names, fork/build identifiers and the GWRL transaction. The crash handler does not invoke plugin callbacks.
 
 Dumps remain local in `Documents/GWToolboxpp/<ComputerName>/crashes`. Share them manually with the fork maintainer alongside reproduction steps and the cached build metadata, which identifies the matching symbols kept locally by the maintainer. Dumps can contain process memory; use the maintainer's agreed private reporting channel. See [crash troubleshooting](/docs/troubleshooting/#crash-dump-errors) and [fork release metadata](/docs/fork_releases/).
+
+## Module messaging
+
+Modules can register message destinations through GWRL using the [module routing contract and API](/docs/gwrl_routing/). The receiving module owns its commands and payloads. Messaging becomes available only when the launcher negotiates the extension; update notifications and the normal save/unload/reload behavior retain their existing meaning.

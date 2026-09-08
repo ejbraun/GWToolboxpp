@@ -2,6 +2,7 @@
 #include "GWRL.h"
 #include <ForkVersion.h>
 #include <GWToolbox.h>
+#include <Logger.h>
 #include <Modules/CrashHandler.h>
 #include <Modules/PluginModule.h>
 #include <Utils/TextUtils.h>
@@ -40,12 +41,13 @@ void GWRL::SignalTerminate()
     std::scoped_lock lock(mutex_);
     stopping_ = true;
     welcomed_ = false;
+    router_.Close();
     transport_.Stop();
 }
 
 bool GWRL::CanTerminate()
 {
-    return transport_.Stopped();
+    return transport_.Stopped() && router_.Drained();
 }
 
 std::vector<Gwrl::Artifact> GWRL::Inventory(const bool refresh) const
@@ -59,13 +61,15 @@ std::vector<Gwrl::Artifact> GWRL::Inventory(const bool refresh) const
 bool GWRL::Send(Gwrl::Message message)
 {
     message.session_id = session_;
+    if (router_.Negotiated()) message.recipient = "gwrl";
     message.pid = GetCurrentProcessId();
     message.process_started = std::to_string(Gwrl::ProcessStarted(GetCurrentProcess()));
     message.state = state_;
     if (message.transaction_id.empty() && message.type != "update_request") message.transaction_id = transaction_;
     std::string json;
-    if (glz::write_json(message, json) || !transport_.Send(json)) {
+    if (glz::write_json(message, json) || !transport_.Send(json, generation_, &last_send_ticket_)) {
         welcomed_ = false;
+        router_.Suspend();
         detail_ = "GWRL connection is unavailable. The launcher must reconnect to continue.";
         return false;
     }
@@ -91,12 +95,20 @@ void GWRL::Handle(const Gwrl::Message& request)
         if (!std::ranges::contains(request.capabilities, "cooperative_update_v1")
             || !std::ranges::contains(request.capabilities, "normal_lifecycle_v1")) {
             welcomed_ = false;
+            router_.Suspend();
             Reply(request, "error", "unsupported_capability", "cooperative_update_v1 and normal_lifecycle_v1 are required.");
             return;
         }
         startup_reported_ = false;
         welcomed_ = true;
-        Reply(request, "status");
+        const auto routing = std::ranges::contains(request.capabilities, Gwrl::RoutingCapability);
+        const auto acknowledgement = router_.Welcome(routing, request.routing);
+        Gwrl::Message status;
+        status.type = "status";
+        status.request_id = request.request_id;
+        status.artifacts = Inventory();
+        if (routing) status.routing = acknowledgement;
+        router_.FinishWelcome(Send(std::move(status)));
         return;
     }
     if (!welcomed_) { Reply(request, "error", "handshake_required"); return; }
@@ -176,6 +188,8 @@ void GWRL::Handle(const Gwrl::Message& request)
     if (request.type == "begin_unload") {
         if (state_ != "prepared") { Reply(request, "error", "invalid_state"); return; }
         if (full_update_) {
+            router_.Quiesce();
+            shutdown_ticket_ = 0;
             state_ = "shutting_down";
             detail_ = "Toolbox is exiting through its normal save and shutdown path.";
             shutdown_notified_ = false;
@@ -208,6 +222,8 @@ void GWRL::Handle(const Gwrl::Message& request)
         if (restarted_ && (state_ == "starting" || state_ == "ready" || state_ == "failed")) {
             std::string error;
             if (!PluginModule::ReserveUpdate({}, true, error)) { Reply(request, "error", "plugin_busy", error); return; }
+            router_.Quiesce();
+            shutdown_ticket_ = 0;
             state_ = "shutting_down";
             detail_ = "Toolbox is exiting normally so GWRL can restore the original files.";
             shutdown_notified_ = false;
@@ -249,7 +265,7 @@ void GWRL::Handle(const Gwrl::Message& request)
 
 void GWRL::Update(float)
 {
-    std::scoped_lock lock(mutex_);
+    std::unique_lock lock(mutex_);
     if (stopping_) return;
     const auto now = GetTickCount64();
     const auto connected = transport_.Connected();
@@ -267,6 +283,7 @@ void GWRL::Update(float)
     }
     if (!connected) {
         welcomed_ = false;
+        router_.Suspend();
         if (!pending_request_.empty()) {
             detail_ = request_acknowledged_
                 ? "GWRL disconnected after acknowledging the request. Check the launcher for progress before retrying."
@@ -286,6 +303,7 @@ void GWRL::Update(float)
         if (!descriptor) return;
         if (session_ != descriptor->session_id) replies_.clear();
         session_ = descriptor->session_id;
+        router_.BeginSession(session_, generation_);
         welcomed_ = false;
         startup_reported_ = shutdown_notified_ = false;
         last_received_ = now;
@@ -293,13 +311,20 @@ void GWRL::Update(float)
         Gwrl::Message hello;
         hello.type = "hello";
         hello.detail = std::format("Toolbox {} ({})", GWTOOLBOX_FORK_DISPLAY_VERSION, GWTOOLBOX_FORK_BUILD_ID);
-        hello.capabilities = {"cooperative_update_v1", "normal_lifecycle_v1", "plugin_reload", "toolbox_unload"};
+        hello.capabilities = {"cooperative_update_v1", "normal_lifecycle_v1", "plugin_reload", "toolbox_unload", "module_routing_v1"};
+        hello.routing = router_.Offer();
         if (state_ == "failed") hello.code = "startup_failed";
         hello.artifacts = Inventory();
         Send(std::move(hello));
     }
-    for (const auto& json : transport_.Receive()) {
+    for (const auto& frame : transport_.ReceiveFrames()) {
         if (!transport_.Connected()) break;
+        Gwrl::Envelope envelope;
+        const auto routed = router_.Route(frame, envelope);
+        if (routed == Gwrl::Routed::Invalid) continue;
+        last_received_ = now;
+        if (routed == Gwrl::Routed::Handled) continue;
+        const auto& json = frame.json;
         Gwrl::Message request;
         if (json.size() > Gwrl::MaximumPayload || glz::read<json_options>(request, json)
             || !Gwrl::ValidateEnvelope(request, session_, GetCurrentProcessId(), Gwrl::ProcessStarted(GetCurrentProcess()))) continue;
@@ -310,7 +335,7 @@ void GWRL::Update(float)
         if (mutation) {
             if (const auto prior = replies_.find(request.request_id); prior != replies_.end()) {
                 if (prior->second.first != json) Reply(request, "error", "request_id_reused");
-                else if (!transport_.Send(prior->second.second)) welcomed_ = false;
+                else if (!transport_.Send(prior->second.second, generation_)) welcomed_ = false;
                 continue;
             }
             if (replies_.size() >= 128) { Reply(request, "error", "reconnect_required"); continue; }
@@ -321,6 +346,7 @@ void GWRL::Update(float)
     }
     if (welcomed_ && now - last_received_ > 15000) {
         welcomed_ = false;
+        router_.Suspend();
         detail_ = "GWRL stopped responding. Updates are paused until the launcher reconnects.";
     }
     if (connected && now >= next_ping_) {
@@ -351,11 +377,11 @@ void GWRL::Update(float)
         Gwrl::Message event;
         event.type = "shutdown_starting";
         event.detail = detail_;
-        Send(std::move(event));
+        if (Send(std::move(event))) shutdown_ticket_ = last_send_ticket_;
         shutdown_notified_ = welcomed_;
     }
     if (state_ == "shutting_down" && shutdown_notified_ && !shutdown_started_
-        && welcomed_ && connected && transport_.Flushed()) {
+        && welcomed_ && connected && transport_.Flushed(shutdown_ticket_, generation_)) {
         shutdown_started_ = true;
         GWToolbox::SignalTerminate();
     }
@@ -369,6 +395,15 @@ void GWRL::Update(float)
         Send(std::move(event));
     }
     CrashHandler::SetUpdateDiagnostics(std::format("GWRL transaction={} state={} connected={}\n", transaction_, state_, welcomed_));
+    lock.unlock();
+    router_.Pump();
+    const auto diagnostic = router_.Diagnostic();
+    if (diagnostic.count != routing_diagnostic_count_ && now >= next_routing_diagnostic_) {
+        routing_diagnostic_count_ = diagnostic.count;
+        next_routing_diagnostic_ = now + 5000;
+        Log::Log("GWRL routing: %s recipient=%s type=%s request=%s failures=%llu", diagnostic.code.c_str(),
+            diagnostic.recipient.c_str(), diagnostic.type.c_str(), diagnostic.request_id.c_str(), diagnostic.count);
+    }
 }
 
 void GWRL::DrawStatus()
@@ -409,4 +444,12 @@ void GWRL::Draw(IDirect3DDevice9*)
     ImGui::SetNextWindowSize(ImVec2(360.f, 0.f), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("GWRL updates", &show_notification_, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing)) DrawStatus();
     ImGui::End();
+}
+
+#if defined(_M_IX86)
+#pragma comment(linker, "/EXPORT:GWRL_GetApi=_GWRL_GetApi")
+#endif
+extern "C" __declspec(dllexport) const GwrlApi* GWRL_CALL GWRL_GetApi(const uint32_t abi)
+{
+    return abi == 1 ? GWRL::Instance().RoutingApi() : nullptr;
 }

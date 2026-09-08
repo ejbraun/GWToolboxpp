@@ -18,6 +18,7 @@ namespace GuiUtils {
         bool decoding = false;
         bool decoded = false;
         bool sanitised = false;
+        bool sanitise_enabled = true;
         SanitiseCallback sanitise_cb;
         void sanitise();
         void decode();

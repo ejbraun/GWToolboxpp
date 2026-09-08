@@ -1,4 +1,5 @@
 #include "TrackerGame.h"
+#include <PluginUtils.h>
 
 #include <algorithm>
 #include <limits>
@@ -423,7 +424,7 @@ namespace TrackerAdvanced {
         }
         const auto entry = std::ranges::find(map_catalog_, context->map_id, &MapCatalogEntry::map_id);
         if (entry != map_catalog_.end()) {
-            entry->name = WideToUtf8(decoded);
+            entry->name = WideToUtf8(PluginUtils::StripTags(decoded).c_str());
         }
     }
 

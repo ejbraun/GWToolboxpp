@@ -20,6 +20,7 @@
 #include <GWCA/Utilities/Scanner.h>
 #include <Timer.h>
 #include <GWToolbox.h>
+#include <Modules/GlobalSettings.h>
 #include <Utils/TextUtils.h>
 #include <Modules/Resources.h>
 
@@ -45,7 +46,12 @@ namespace {
     TBHotkey* current_hotkey = nullptr;
 
     std::deque<TBHotkey*> pending_hotkeys;
-    std::recursive_mutex pending_mutex;
+    std::recursive_mutex hotkeys_mutex;
+
+    TBHotkey* pending_being_assigned = nullptr;
+    TBHotkey* keys_being_assigned = nullptr;
+    KeysHeldBitset keys_selected;
+    bool hotkey_popup_first_draw = true;
 
     bool IsHotkeySection(const char* section)
     {
@@ -91,21 +97,36 @@ namespace {
     }
 
     void PushPendingHotkey(TBHotkey* hk) {
-        pending_mutex.lock();
+        const std::scoped_lock lock(hotkeys_mutex);
         if (std::ranges::find(pending_hotkeys, hk) == pending_hotkeys.end()) {
             pending_hotkeys.push_back(hk);
         }
-        pending_mutex.unlock();
     }
     TBHotkey* PopPendingHotkey() {
+        const std::scoped_lock lock(hotkeys_mutex);
         TBHotkey* hk = nullptr;
-        pending_mutex.lock();
         if (pending_hotkeys.size()) {
             hk = pending_hotkeys.front();
             pending_hotkeys.pop_front();
         }
-        pending_mutex.unlock();
         return hk;
+    }
+
+    void DeleteHotkeys()
+    {
+        valid_hotkeys.clear();
+        pending_hotkeys.clear();
+        current_hotkey = nullptr;
+        pending_being_assigned = nullptr;
+        keys_being_assigned = nullptr;
+        keys_selected.reset();
+        keys_currently_held.reset();
+        wndproc_keys_held.reset();
+        hotkey_popup_first_draw = true;
+        HotkeyToggle::processing = false;
+        while (!TBHotkey::all_hotkeys.empty()) {
+            delete TBHotkey::all_hotkeys[0];
+        }
     }
 
     bool loaded_action_labels = false;
@@ -170,6 +191,8 @@ namespace {
     // Used because its not necessary to check these vars on every keystroke, only when they change
     bool CheckSetValidHotkeys()
     {
+        const std::scoped_lock lock(hotkeys_mutex);
+        valid_hotkeys.clear();
         const auto c = GW::GetCharContext();
         if (!c) {
             return false;
@@ -183,7 +206,6 @@ namespace {
         const GW::Constants::MapID map_id = GW::Map::GetMapID();
         const auto primary = static_cast<GW::Constants::Profession>(me->primary);
         const bool is_pvp = me->IsPvP();
-        valid_hotkeys.clear();
         for (auto* hotkey : TBHotkey::top_level_hotkeys) {
             AddHotkeyIfValid(hotkey, player_name.c_str(), instance_type, primary, map_id, is_pvp, valid_hotkeys);
         }
@@ -271,25 +293,22 @@ namespace {
         }
     }
 
-    TBHotkey* pending_being_assigned = nullptr;
-    TBHotkey* keys_being_assigned = nullptr;
-    KeysHeldBitset keys_selected;
-    bool hotkey_popup_first_draw = true;
-    void DrawSelectHotkeyPopup() {
+    bool DrawSelectHotkeyPopup() {
+        auto changed = false;
         if (pending_being_assigned) {
             keys_being_assigned = pending_being_assigned;
             ImGui::OpenPopup("Select Hotkey");
             pending_being_assigned = nullptr;
-            return;
+            return false;
         }
         if (!keys_being_assigned) {
-            return;
+            return false;
         }
         if (!ImGui::BeginPopup("Select Hotkey")) {
             keys_selected.reset();
             hotkey_popup_first_draw = true;
             keys_being_assigned = nullptr;
-            return;
+            return false;
         }
         if (hotkey_popup_first_draw) {
             keys_selected = keys_being_assigned->key_combo;
@@ -310,10 +329,12 @@ namespace {
         }
         ImGui::SameLine();
         if (ImGui::Button("Save")) {
+            changed = keys_being_assigned->key_combo != keys_selected;
             keys_being_assigned->key_combo = keys_selected;
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
+        return changed;
     }
 
     size_t KeyDataFromWndProc(const UINT Message, const WPARAM wParam) {
@@ -346,15 +367,19 @@ void HotkeysWindow::Initialize()
 
 const TBHotkey* HotkeysWindow::CurrentHotkey()
 {
+    const std::scoped_lock lock(hotkeys_mutex);
     return current_hotkey;
 }
 
 void HotkeysWindow::Terminate()
 {
-    ToolboxWindow::Terminate();
-    while (TBHotkey::all_hotkeys.size())
-        delete TBHotkey::all_hotkeys[0];
-    HotkeyGWKey::control_labels.clear();
+    {
+        const std::scoped_lock lock(hotkeys_mutex);
+        ToolboxWindow::Terminate();
+        DeleteHotkeys();
+        HotkeyGWKey::control_labels.clear();
+    }
+    GlobalSettings::InvalidateHotkeys();
 }
 
 bool HotkeysWindow::ToggleClicker() { return clickerActive = !clickerActive; }
@@ -362,120 +387,133 @@ bool HotkeysWindow::ToggleCoinDrop() { return dropCoinsActive = !dropCoinsActive
 
 void HotkeysWindow::ChooseKeyCombo(TBHotkey* hotkey)
 {
+    const std::scoped_lock lock(hotkeys_mutex);
     pending_being_assigned = hotkey;
 }
 
 void HotkeysWindow::Draw(IDirect3DDevice9*)
 {
-    DrawSelectHotkeyPopup();
+    auto hotkeys_changed = false;
+    {
+        const std::scoped_lock lock(hotkeys_mutex);
+        hotkeys_changed = DrawSelectHotkeyPopup();
 
-    if (!visible) {
-        return;
-    }
-    LoadActionLabels();
-    bool hotkeys_changed = false;
-    // === hotkey panel ===
-    ImGui::SetNextWindowCenter(ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(300, 400), ImGuiCond_FirstUseEver);
-    if (ImGui::Begin(Name(), GetVisiblePtr(), GetWinFlags())) {
-        if (ImGui::Button("Create Hotkey...", ImVec2(ImGui::GetContentRegionAvail().x, 0))) {
-            ImGui::OpenPopup("Create Hotkey");
-        }
-        if (ImGui::BeginPopup("Create Hotkey")) {
-            TBHotkey* new_hotkey = nullptr;
-            if (ImGui::Selectable("Send Chat")) {
-                new_hotkey = new HotkeySendChat(nullptr, nullptr);
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Send a message or command to chat");
-            }
-            if (ImGui::Selectable("Use Item")) {
-                new_hotkey = new HotkeyUseItem(nullptr, nullptr);
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Use an item from your inventory");
-            }
-            if (ImGui::Selectable("Drop or Use Buff")) {
-                new_hotkey = new HotkeyDropUseBuff(nullptr, nullptr);
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Use or cancel a skill such as Recall or UA");
-            }
-            if (ImGui::Selectable("Toggle...")) {
-                new_hotkey = new HotkeyToggle(nullptr, nullptr);
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Toggle a GWToolbox++ functionality such as clicker");
-            }
-            if (ImGui::Selectable("Execute...")) {
-                new_hotkey = new HotkeyAction(nullptr, nullptr);
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Execute a single task such as opening chests\nor reapplying lightbringer title");
-            }
-            if (ImGui::Selectable("Guild Wars Key")) {
-                new_hotkey = new HotkeyGWKey(nullptr, nullptr);
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Trigger an in-game hotkey via toolbox");
-            }
-            if (ImGui::Selectable("Target")) {
-                new_hotkey = new HotkeyTarget(nullptr, nullptr);
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Target a game entity by its ID");
-            }
-            if (ImGui::Selectable("Move to")) {
-                new_hotkey = new HotkeyMove(nullptr, nullptr);
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Move to a specific (x,y) coordinate");
-            }
-            if (ImGui::Selectable("Dialog")) {
-                new_hotkey = new HotkeyDialog(nullptr, nullptr);
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Send a Dialog");
-            }
-if (ImGui::Selectable("Equip Item")) {
-                new_hotkey = new HotkeyEquipItem(nullptr, nullptr);
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Equip an item from your inventory");
-            }
-            if (ImGui::Selectable("Flag Hero")) {
-                new_hotkey = new HotkeyFlagHero(nullptr, nullptr);
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Flag a hero relative to your position");
-            }
-            if (ImGui::Selectable("Command Pet")) {
-                new_hotkey = new HotkeyCommandPet(nullptr, nullptr);
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Change behavior of your pet");
-            }
-            ImGui::Separator();
-            if (ImGui::Selectable("Hotkey Group")) {
-                new_hotkey = new HotkeyGroup(nullptr, nullptr);
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Create a named group to organise and reorder hotkeys");
-            }
-            ImGui::EndPopup();
-            hotkeys_changed = new_hotkey != 0;
-        }
+        if (visible) {
+            LoadActionLabels();
+            // === hotkey panel ===
+            ImGui::SetNextWindowCenter(ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(300, 400), ImGuiCond_FirstUseEver);
+            if (ImGui::Begin(Name(), GetVisiblePtr(), GetWinFlags())) {
+                if (ImGui::Button("Create Hotkey...", ImVec2(ImGui::GetContentRegionAvail().x, 0))) {
+                    ImGui::OpenPopup("Create Hotkey");
+                }
+                if (ImGui::BeginPopup("Create Hotkey")) {
+                    TBHotkey* new_hotkey = nullptr;
+                    if (ImGui::Selectable("Send Chat")) {
+                        new_hotkey = new HotkeySendChat(nullptr, nullptr);
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Send a message or command to chat");
+                    }
+                    if (ImGui::Selectable("Use Item")) {
+                        new_hotkey = new HotkeyUseItem(nullptr, nullptr);
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Use an item from your inventory");
+                    }
+                    if (ImGui::Selectable("Drop or Use Buff")) {
+                        new_hotkey = new HotkeyDropUseBuff(nullptr, nullptr);
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Use or cancel a skill such as Recall or UA");
+                    }
+                    if (ImGui::Selectable("Toggle...")) {
+                        new_hotkey = new HotkeyToggle(nullptr, nullptr);
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Toggle a GWToolbox++ functionality such as clicker");
+                    }
+                    if (ImGui::Selectable("Execute...")) {
+                        new_hotkey = new HotkeyAction(nullptr, nullptr);
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Execute a single task such as opening chests\nor reapplying lightbringer title");
+                    }
+                    if (ImGui::Selectable("Guild Wars Key")) {
+                        new_hotkey = new HotkeyGWKey(nullptr, nullptr);
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Trigger an in-game hotkey via toolbox");
+                    }
+                    if (ImGui::Selectable("Target")) {
+                        new_hotkey = new HotkeyTarget(nullptr, nullptr);
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Target a game entity by its ID");
+                    }
+                    if (ImGui::Selectable("Move to")) {
+                        new_hotkey = new HotkeyMove(nullptr, nullptr);
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Move to a specific (x,y) coordinate");
+                    }
+                    if (ImGui::Selectable("Dialog")) {
+                        new_hotkey = new HotkeyDialog(nullptr, nullptr);
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Send a Dialog");
+                    }
+                    if (ImGui::Selectable("Equip Item")) {
+                        new_hotkey = new HotkeyEquipItem(nullptr, nullptr);
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Equip an item from your inventory");
+                    }
+                    if (ImGui::Selectable("Flag Hero")) {
+                        new_hotkey = new HotkeyFlagHero(nullptr, nullptr);
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Flag a hero relative to your position");
+                    }
+                    if (ImGui::Selectable("Command Pet")) {
+                        new_hotkey = new HotkeyCommandPet(nullptr, nullptr);
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Change behavior of your pet");
+                    }
+                    ImGui::Separator();
+                    if (ImGui::Selectable("Hotkey Group")) {
+                        new_hotkey = new HotkeyGroup(nullptr, nullptr);
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Create a named group to organise and reorder hotkeys");
+                    }
+                    ImGui::EndPopup();
+                    hotkeys_changed |= new_hotkey != nullptr;
+                }
 
-        for (auto hotkey : TBHotkey::top_level_hotkeys) {
-            if (hotkey->Draw()) break; // re-render next frame after list mutation
+                // === each hotkey / group ===
+                // Groups are first-class items in `hotkeys`; HotkeyGroup::Draw handles its children.
+                // All moves at the top level are simple swaps — no rotation needed.
+                for (auto hotkey : TBHotkey::top_level_hotkeys) {
+                    if (hotkey->Draw()) {
+                        hotkeys_changed = true;
+                        break; // re-render next frame after list mutation
+                    }
+                }
+            }
+            if (hotkeys_changed) {
+                TBHotkey::SortHotkeys();
+                CheckSetValidHotkeys();
+            }
+
+            ImGui::End();
         }
     }
     if (hotkeys_changed) {
-        TBHotkey::SortHotkeys();
-        CheckSetValidHotkeys();
+        std::string error;
+        if (!GlobalSettings::SaveHotkeys(&error)) Log::Error("Unable to save global hotkeys: %s", error.c_str());
     }
-
-    ImGui::End();
 }
 
 void HotkeysWindow::DrawSettingsInternal()
@@ -488,14 +526,43 @@ void HotkeysWindow::DrawSettingsInternal()
 
 void HotkeysWindow::LoadSettings(SettingsDoc& doc, ToolboxIni* legacy)
 {
-    ToolboxWindow::LoadSettings(doc, legacy);
-    doc.GetStruct(Name(), settings);
+    {
+        const std::scoped_lock lock(hotkeys_mutex);
+        ToolboxWindow::LoadSettings(doc, legacy);
+        doc.GetStruct(Name(), settings);
+    }
 
-    while (!TBHotkey::all_hotkeys.empty())
-        delete TBHotkey::all_hotkeys[0]; // removes the first element in the destructor
+    std::string error;
+    if (!GlobalSettings::EnsureHotkeysLoaded(doc, legacy, &error)) {
+        Log::Warning("Unable to load global hotkeys: %s", error.c_str());
+    }
+}
 
+bool HotkeysWindow::LoadGlobalSettings(SettingsDoc& doc, ToolboxIni* legacy)
+{
+    const std::scoped_lock lock(hotkeys_mutex);
     std::vector<HotkeyEntry> entries;
-    if (doc.Get(Name(), "hotkeys", entries)) {
+    ToolboxIni hotkeys_ini;
+    const auto has_json = doc.Has(Name(), "hotkeys");
+    if (has_json && !doc.Get(Name(), "hotkeys", entries)) {
+        return false;
+    }
+    if (!has_json) {
+        const auto hotkeys_ini_path = Resources::GetLegacySettingFile(HotkeysIniFilename);
+        if (hotkeys_ini.LoadIfExists(hotkeys_ini_path) != SI_OK) {
+            Log::WarningW(L"Unable to load legacy hotkeys from %s", hotkeys_ini_path.c_str());
+            return false;
+        }
+        hotkeys_ini.location_on_disk = hotkeys_ini_path;
+
+        // Migrated hotkeys only live in memory until the JSON save; never write any .ini back to disk
+        if (legacy && MigrateLegacyHotkeys(legacy, &hotkeys_ini)) {
+            DeleteHotkeySections(legacy);
+        }
+    }
+
+    DeleteHotkeys();
+    if (has_json) {
         ToolboxIni tmp_ini;
         char buf[256];
         int sec_idx = 0;
@@ -508,16 +575,6 @@ void HotkeysWindow::LoadSettings(SettingsDoc& doc, ToolboxIni* legacy)
         }
     }
     else {
-        ToolboxIni hotkeys_ini;
-        const auto hotkeys_ini_path = Resources::GetLegacySettingFile(HotkeysIniFilename);
-        ASSERT(hotkeys_ini.LoadIfExists(hotkeys_ini_path) == SI_OK);
-        hotkeys_ini.location_on_disk = hotkeys_ini_path;
-
-        // Migrated hotkeys only live in memory until the JSON save; never write any .ini back to disk
-        if (legacy && MigrateLegacyHotkeys(legacy, &hotkeys_ini)) {
-            DeleteHotkeySections(legacy);
-        }
-
         TNamesDepend ini_sections;
         hotkeys_ini.GetAllSections(ini_sections);
 
@@ -528,12 +585,19 @@ void HotkeysWindow::LoadSettings(SettingsDoc& doc, ToolboxIni* legacy)
 
     TBHotkey::SortHotkeys();
     CheckSetValidHotkeys();
+    return true;
 }
 
 void HotkeysWindow::SaveSettings(SettingsDoc& doc)
 {
+    const std::scoped_lock lock(hotkeys_mutex);
     ToolboxWindow::SaveSettings(doc);
     doc.SetStruct(Name(), settings);
+}
+
+void HotkeysWindow::SaveGlobalSettings(SettingsDoc& doc)
+{
+    const std::scoped_lock lock(hotkeys_mutex);
 
     std::vector<HotkeyEntry> entries;
     entries.reserve(TBHotkey::all_hotkeys.size());
@@ -556,6 +620,7 @@ void HotkeysWindow::SaveSettings(SettingsDoc& doc)
 
 bool HotkeysWindow::WndProc(const UINT Message, const WPARAM wParam, LPARAM)
 {
+    const std::scoped_lock lock(hotkeys_mutex);
     if (Message == WM_LBUTTONUP && HotkeyToggle::processing) {
         HotkeyToggle::processing = false;
     }
@@ -650,6 +715,7 @@ bool HotkeysWindow::WndProc(const UINT Message, const WPARAM wParam, LPARAM)
 
 void HotkeysWindow::Update(const float)
 {
+    const std::scoped_lock lock(hotkeys_mutex);
     if (GW::Map::GetInstanceType() == GW::Constants::InstanceType::Loading) {
         if (map_change_triggered) {
             map_change_triggered = false;

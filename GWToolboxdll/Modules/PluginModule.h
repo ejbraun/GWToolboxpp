@@ -20,6 +20,7 @@ public:
         ToolboxPlugin* instance = nullptr;
         bool initialized = false;
         bool terminating = false;
+        bool termination_signalled = false;
         bool visible = false;
         bool enabled = false;
         bool reserved = false;
@@ -47,6 +48,8 @@ public:
     void DrawSettingsInternal() override;
     void LoadSettings(SettingsDoc& doc, ToolboxIni* legacy) override;
     void SaveSettings(SettingsDoc& doc) override;
+    bool LoadGlobalSettings(SettingsDoc& doc, ToolboxIni* legacy);
+    void SaveGlobalSettings(SettingsDoc& doc);
     void Update(float) override;
     void Initialize() override;
     void SignalTerminate() override;

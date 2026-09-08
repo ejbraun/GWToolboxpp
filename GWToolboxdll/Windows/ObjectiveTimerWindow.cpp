@@ -25,6 +25,7 @@
 
 #include <GWToolbox.h>
 #include <Utils/GuiUtils.h>
+#include <Utils/TextUtils.h>
 #include <Logger.h>
 #include <GWCA/Context/CharContext.h>
 #include <Modules/ChatCommands.h>
@@ -36,8 +37,6 @@ namespace {
     ObjectiveTimerWindow::Settings settings;
 
     int n_columns = 4;
-
-    bool loading = false;
 
     bool map_load_pending = false;
     GW::Packet::StoC::InstanceLoadInfo* InstanceLoadInfo = nullptr;
@@ -250,7 +249,7 @@ namespace {
 
 void ObjectiveTimerWindow::CheckIsMapLoaded()
 {
-    if (!map_load_pending || !InstanceLoadInfo || !InstanceLoadFile || !InstanceTimer) {
+    if (history_stopping || !map_load_pending || !InstanceLoadInfo || !InstanceLoadFile || !InstanceTimer) {
         return;
     }
     map_load_pending = false;
@@ -266,14 +265,28 @@ void ObjectiveTimerWindow::CheckIsMapLoaded()
 
 void ObjectiveTimerWindow::Terminate() {
     ToolboxWindow::Terminate();
-    for (size_t i = 0; i < 5000 && loading; i += 10) {
-        Sleep(10);
-    }
+    ASSERT(!history_task.valid());
     ClearObjectiveSets();
     EnableWebsocketServer(false);
 }
+void ObjectiveTimerWindow::SignalTerminate()
+{
+    ToolboxWindow::SignalTerminate();
+    history_stopping = true;
+    history_load_pending = false;
+    StopObjectives();
+    SaveRuns();
+}
+
+bool ObjectiveTimerWindow::CanTerminate()
+{
+    UpdateHistory();
+    return !history_task.valid() && !history_save_pending;
+}
+
 void ObjectiveTimerWindow::Initialize()
 {
+    history_stopping = false;
     ToolboxWindow::Initialize();
     SettingsRegistry::Register(this, settings);
 
@@ -601,11 +614,15 @@ void ObjectiveTimerWindow::ObjectiveSet::StopObjectives()
 
 void ObjectiveTimerWindow::AddObjectiveSet(ObjectiveSet* os)
 {
+    if (history_stopping) {
+        delete os;
+        return;
+    }
     for (const auto& cos : objective_sets) {
         cos.second->StopObjectives();
         cos.second->need_to_collapse = true;
     }
-    objective_sets.emplace(os->system_time, os);
+    objective_sets.emplace(std::make_pair(os->system_time, os->run_id), os);
     display_order_dirty = true;
     if (os->active) {
         current_objective_set = os;
@@ -918,19 +935,19 @@ void ObjectiveTimerWindow::AddToPKObjectiveSet()
 
 void ObjectiveTimerWindow::Update(float)
 {
+    UpdateHistory();
+    if (history_stopping) return;
     if (current_objective_set && current_objective_set->active) {
         current_objective_set->Update();
     }
-    if (runs_dirty && GW::Map::GetInstanceType() == GW::Constants::InstanceType::Loading) {
+    if (runs_dirty && std::chrono::steady_clock::now() >= history_retry_at
+        && GW::Map::GetInstanceType() == GW::Constants::InstanceType::Loading) {
         SaveRuns(); // Save runs between map loads
     }
 }
 
 void ObjectiveTimerWindow::Draw(IDirect3DDevice9*)
 {
-    if (loading) {
-        return;
-    }
     static DWORD today_refreshed_at = 0;
     if (const DWORD tick = GetTickCount(); today_yday < 0 || tick - today_refreshed_at >= 1000) {
         today_refreshed_at = tick;
@@ -945,7 +962,7 @@ void ObjectiveTimerWindow::Draw(IDirect3DDevice9*)
         }
         clear_cached_times = false;
     }
-    if (visible && !loading) {
+    if (visible) {
         ImGui::SetNextWindowCenter(ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(300, 0), ImGuiCond_FirstUseEver);
         if (ImGui::Begin(Name(), GetVisiblePtr(), GetWinFlags())) {
@@ -977,15 +994,18 @@ void ObjectiveTimerWindow::Draw(IDirect3DDevice9*)
                         continue;
                     }
                     if (os->IsCollapsedRow()) {
-                        const float y = ImGui::GetCursorScreenPos().y + (skipped_height > 0.f ? skipped_height + spacing : 0.f);
-                        if (!ImGui::IsRectVisible({0.f, y}, {1.f, y + row_height})) {
+                        const auto cursor = ImGui::GetCursorScreenPos();
+                        const auto y = cursor.y + (skipped_height > 0.f ? skipped_height + spacing : 0.f);
+                        const auto right = cursor.x + std::max(1.f, ImGui::GetContentRegionAvail().x);
+                        if (!ImGui::IsRectVisible({cursor.x, y}, {right, y + row_height})) {
                             skipped_height = skipped_height > 0.f ? skipped_height + spacing + row_height : row_height;
                             continue;
                         }
                     }
                     flush_skipped();
                     if (!os->Draw()) {
-                        objective_sets.erase(os->system_time);
+                        if (os == current_objective_set) StopObjectives();
+                        objective_sets.erase(std::make_pair(os->system_time, os->run_id));
                         delete os;
                         display_order_dirty = true;
                         break; // we're skipping the rest of this frame; NBD
@@ -1113,117 +1133,74 @@ void ObjectiveTimerWindow::SaveSettings(SettingsDoc& doc)
 
 void ObjectiveTimerWindow::LoadRuns()
 {
-    if (!settings.save_to_disk) {
-        return;
-    }
+    if (!settings.save_to_disk || history_stopping) return;
     // Because this does a load of file reads and JSON decoding, its on a separate thread; it could delay rendering by
     // seconds
-    while (loading) {
-        Sleep(10);
-    }
-    loading = true;
-    Resources::EnqueueWorkerTask([] {
-        ObjectiveTimerWindow& instance = Instance();
-        // ClearObjectiveSets();
-        Resources::EnsureFolderExists(Resources::GetPath(L"runs"));
-        WIN32_FIND_DATAW FindFileData;
-        size_t max_objectives_in_memory = 200;
-        std::wstring file_match = Resources::GetPath(L"runs", L"ObjectiveTimerRuns_*.json");
-        std::wstring filename;
-        std::set<std::wstring> obj_timer_files;
-        HANDLE hFind = FindFirstFileW(file_match.c_str(), &FindFileData);
-        if (hFind != INVALID_HANDLE_VALUE) {
-            obj_timer_files.insert(FindFileData.cFileName);
-            while (FindNextFileW(hFind, &FindFileData) != 0) {
-                obj_timer_files.insert(FindFileData.cFileName);
-            }
-        }
-        FindClose(hFind);
-
-        for (auto it = obj_timer_files.rbegin(); it != obj_timer_files.rend() && instance.objective_sets.size() < max_objectives_in_memory; ++it) {
-            try {
-                std::ifstream file;
-                std::wstring fn = Resources::GetPath(L"runs", *it);
-                file.open(fn);
-                if (file.is_open()) {
-                    std::stringstream ss;
-                    ss << file.rdbuf();
-                    std::vector<ObjectiveSet::Serialized> os_arr;
-                    constexpr glz::opts opts{.error_on_unknown_keys = false};
-                    if (auto ec = glz::read<opts>(os_arr, ss.str()); !ec) {
-                        for (const auto& elem : os_arr) {
-                            ObjectiveSet* os = ObjectiveSet::FromJson(elem);
-                            if (instance.objective_sets.contains(os->system_time)) {
-                                delete os;
-                                continue; // Don't load in a run that already exists
-                            }
-                            os->StopObjectives();
-                            os->need_to_collapse = true;
-                            os->from_disk = true;
-                            instance.objective_sets.emplace(os->system_time, os);
-                            instance.display_order_dirty = true;
-                        }
-                    }
-                    file.close();
-                }
-            } catch (const std::exception&) {
-                Log::Error("Failed to load ObjectiveSets from json");
-            }
-        }
-        loading = false;
-    });
+    history_load_pending = true;
+    UpdateHistory();
 }
 
 void ObjectiveTimerWindow::SaveRuns()
 {
-    if (!settings.save_to_disk || objective_sets.empty()) {
-        return;
-    }
-    while (loading) {
-        Sleep(10);
-    }
-    loading = true;
-    Resources::EnqueueWorkerTask([] {
-        ObjectiveTimerWindow& instance = Instance();
-        Resources::EnsureFolderExists(Resources::GetPath(L"runs"));
-        std::map<std::wstring, std::vector<ObjectiveSet*>> objective_sets_by_file;
-        wchar_t filename[36];
-        for (auto& os : instance.objective_sets) {
-            if (os.second->from_disk) {
-                continue; // No need to re-save a run.
-            }
-            time_t tt = os.second->system_time;
-            const tm* structtime = gmtime(&tt);
-            if (!structtime) {
-                continue;
-            }
-            swprintf(filename, 36, L"ObjectiveTimerRuns_%02d-%02d-%02d.json", structtime->tm_year + 1900, structtime->tm_mon + 1, structtime->tm_mday);
-            objective_sets_by_file[filename].push_back(os.second);
-        }
-        for (auto& it : objective_sets_by_file) {
-            try {
-                std::ofstream file;
-                file.open(Resources::GetPath(L"runs", it.first));
-                if (file.is_open()) {
-                    std::vector<ObjectiveSet::Serialized> os_arr;
-                    os_arr.reserve(it.second.size());
-                    for (const auto os : it.second) {
-                        os_arr.push_back(os->ToJson());
-                    }
-                    file << glz::write_json(os_arr).value_or(std::string{}) << std::endl;
-                    file.close();
-                }
-            } catch (const std::exception&) {
-                Log::Error("Failed to save ObjectiveSets to json");
+    if (!settings.save_to_disk || objective_sets.empty()) return;
+    history_save_pending = true;
+    UpdateHistory();
+}
+
+void ObjectiveTimerWindow::UpdateHistory()
+{
+    if (history_task.valid()) {
+        if (history_task.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+        auto result = history_task.get();
+        if (!result.errors.empty()) {
+            for (const auto& error : result.errors) Log::Error("Objective run history: %s", error.c_str());
+            if (history_saving) {
+                runs_dirty = true;
+                history_retry_at = std::chrono::steady_clock::now() + std::chrono::seconds(5);
             }
         }
-        runs_dirty = false;
-        loading = false;
-    });
+        if (!history_stopping) {
+            // ClearObjectiveSets();
+            for (const auto& saved : result.runs) {
+                const auto key = std::make_pair(static_cast<DWORD>(saved.utc_start), ObjectiveTimerHistory::Identity(saved));
+                if (objective_sets.contains(key)) continue; // Don't load in a run that already exists
+                const auto os = ObjectiveSet::FromJson(saved);
+                os->need_to_collapse = true;
+                os->from_disk = true;
+                objective_sets.emplace(key, os);
+                display_order_dirty = true;
+            }
+        }
+    }
+    if (history_save_pending) {
+        history_save_pending = false;
+        std::vector<ObjectiveSet::Serialized> snapshot;
+        for (const auto& [key, os] : objective_sets) {
+            if (os->from_disk) continue; // No need to re-save a run.
+            snapshot.push_back(os->ToJson());
+        }
+        if (!snapshot.empty()) {
+            const auto folder = std::filesystem::path(Resources::GetPath(L"runs"));
+            runs_dirty = false;
+            history_saving = true;
+            // Snapshot values keep worker I/O independent of active runs and module shutdown.
+            history_task = std::async(std::launch::async, [folder, snapshot = std::move(snapshot)] {
+                return ObjectiveTimerHistory::Save(folder, snapshot);
+            });
+            return;
+        }
+    }
+    if (history_load_pending && !history_stopping) {
+        history_load_pending = false;
+        history_saving = false;
+        const auto folder = std::filesystem::path(Resources::GetPath(L"runs"));
+        history_task = std::async(std::launch::async, [folder] { return ObjectiveTimerHistory::Load(folder); });
+    }
 }
 
 void ObjectiveTimerWindow::ClearObjectiveSets()
 {
+    current_objective_set = nullptr;
     for (const auto& os : objective_sets) {
         delete os.second;
     }
@@ -1236,6 +1213,7 @@ void ObjectiveTimerWindow::StopObjectives()
 {
     if (current_objective_set) {
         current_objective_set->StopObjectives();
+        runs_dirty = true;
         WebsocketSendMessage("reset");
     }
     current_objective_set = nullptr;
@@ -1580,6 +1558,9 @@ ObjectiveTimerWindow::ObjectiveSet::ObjectiveSet()
 {
     run_start_time_point = TimerWidget::Instance().GetStartPoint() != TIME_UNKNOWN ? TimerWidget::Instance().GetStartPoint() : time_point_ms();
     character_name = GW::GetCharContext() ? GW::GetCharContext()->player_name : L"";
+    GUID id{};
+    run_id = SUCCEEDED(CoCreateGuid(&id)) ? TextUtils::GuidToString(&id)
+        : std::format("{}-{}-{}", GetCurrentProcessId(), std::chrono::system_clock::now().time_since_epoch().count(), ui_id);
 }
 
 ObjectiveTimerWindow::ObjectiveSet::~ObjectiveSet()
@@ -1597,11 +1578,13 @@ ObjectiveTimerWindow::ObjectiveSet* ObjectiveTimerWindow::ObjectiveSet::FromJson
     const auto os = new ObjectiveSet;
     os->active = false;
     os->system_time = static_cast<DWORD>(json.utc_start);
+    os->run_id = ObjectiveTimerHistory::Identity(json);
+    os->character_name = json.character_name ? TextUtils::StringToWString(*json.character_name) : L"";
     os->name = json.name;
     os->run_start_time_point = static_cast<DWORD>(json.instance_start);
     if (json.duration) os->duration = static_cast<DWORD>(*json.duration);
     for (const auto& o : json.objectives) {
-        os->objectives.emplace_back(Objective::FromJson(o));
+        os->AddObjective(Objective::FromJson(o));
     }
     os->StopObjectives();
     return os;
@@ -1614,6 +1597,8 @@ ObjectiveTimerWindow::ObjectiveSet::Serialized ObjectiveTimerWindow::ObjectiveSe
         .instance_start = run_start_time_point,
         .utc_start = system_time,
         .duration = GetDuration(),
+        .run_id = run_id,
+        .character_name = TextUtils::WStringToString(character_name),
     };
     out.objectives.reserve(objectives.size());
     for (auto* obj : objectives) {

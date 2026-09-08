@@ -43,6 +43,7 @@ namespace GW {
     struct HeroInfo;
     struct Friend;
     struct Item;
+    enum AgentTargetFlags : uint32_t;
     enum class FriendType : uint32_t;
     enum class FriendStatus : uint32_t;
 
@@ -248,6 +249,7 @@ namespace GuiUtils {
 }
 
 namespace ToolboxUtils {
+    bool MatchesTargetFilter(const GW::Agent* agent, GW::AgentTargetFlags filter);
 
     // Helper function to limit some functions to only check every n frames
     bool FrameRateCheck(clock_t& last_checked, clock_t target_fps);

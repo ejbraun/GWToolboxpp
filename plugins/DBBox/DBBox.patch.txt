@@ -4,3 +4,19 @@
 
 ## v2 - 2026-09-05
 - Fix Tactical Minimap movement and resizing when its window locks are disabled.
+
+## v3 - 2026-09-08
+- Remove Guild Wars formatting tags from decoded item, skill, agent, quest and map names used in DBBox features.
+- Fix Speedrun Scripting Tools remaining paused after a loading-screen packet arrives before the map is ready.
+- Stop failed minipet, NPC-dialog and keyboard-movement actions from indefinitely blocking subsequent scripts, and report the failed action.
+- Include else-if branches when determining whether conditional actions must wait, and clear active action state when replacing scripts.
+
+## v4 - 2026-09-08
+- Extend plain decoded text to SST dialogue matching; confirm Loot Notifier's window and chat messages use clean item/player names, and remove Skin Changer's redundant tag parser.
+- Replace Dhuum Calculator's cached agent/progress pointers and narrow health-range startup check with Underworld instance checks, agent-ID validation and mission-progress packet hooks.
+- Reset Dhuum tracking on transitions, despawns and unload, synchronize packet and rendering state, validate prediction inputs, correct signed smoothing, and limit sampling to four times per second.
+
+## v5 - 2026-09-08
+- Fix Pits and Souls staying Unknown when Chained Soul health is available through map-agent data or its position differs from the old 50-unit gate.
+- Track Chained Soul spawn/death events and preserve countdown progress when cached health stops changing, souls leave range or frames are delayed.
+- Reset and synchronize Pits and Souls tracking across map changes and feature unload, and distinguish missing souls from missing health in the window.

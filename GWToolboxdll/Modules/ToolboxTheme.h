@@ -54,6 +54,7 @@ public:
 
     void SaveUILayout();
     void LoadUILayout();
+    [[nodiscard]] bool LastSaveSucceeded() const { return last_save_succeeded_; }
 
     void ApplyWindowSettings(ImGuiWindow* window) const;
 
@@ -69,6 +70,8 @@ private:
     ImGuiStyle ini_style;
     bool layout_dirty = false;
     bool imgui_style_loaded = false;
+    bool last_load_succeeded_ = true;
+    bool last_save_succeeded_ = true;
 
     std::map<std::string, WindowLayout> layout;
 

@@ -10,3 +10,9 @@
 - Add a default-disabled switch for Game Settings name tag recoloring.
 - Publish only the integer fork revision in the Toolbox manifest.
 - Fix the game-exit assertion caused by finalizing plugins before asynchronous unload work completed.
+
+## v3 - 2026-09-08
+- Apply the hidden-NPC targeting bypass consistently to minimap, hotkey and chat targeting while retaining category and corpse filters.
+- Keep decoded names free of markup after changing the game text language.
+- Fix collapsed Objective Timer runs disappearing and restore the visibility of saved run history.
+- Save Objective Timer snapshots in the background, merge history across sessions and clients, and safely finish pending writes during shutdown.

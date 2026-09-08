@@ -33,6 +33,8 @@ public:
     struct HotkeyEntry {
         std::string type;
         std::map<std::string, std::string> fields;
+
+        bool operator==(const HotkeyEntry&) const = default;
     };
 
     void Initialize() override;
@@ -56,4 +58,6 @@ public:
     void DrawSettingsInternal() override;
     void LoadSettings(SettingsDoc& doc, ToolboxIni* legacy) override;
     void SaveSettings(SettingsDoc& doc) override;
+    bool LoadGlobalSettings(SettingsDoc& doc, ToolboxIni* legacy);
+    void SaveGlobalSettings(SettingsDoc& doc);
 };

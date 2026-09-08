@@ -43,6 +43,7 @@
 
 #include <Constants/EncStrings.h>
 #include <Modules/ChatCommands.h>
+#include <Modules/ConfigProfiles.h>
 #include <Modules/ChatSettings.h>
 #include <Modules/DialogModule.h>
 #include <Modules/GameSettings.h>
@@ -175,7 +176,7 @@ namespace {
 
         GW::Agent* closest = nullptr;
         for (const auto agent : *agents) {
-            if (agent == me || !GW::Agents::GetAgentMatchesFlags(agent, GW::TargetFilter::AnyLiving)) {
+            if (agent == me || !ToolboxUtils::MatchesTargetFilter(agent, GW::TargetFilter::AnyLiving)) {
                 continue;
             }
             const float this_distance = GetSquareDistance(me->pos, agent->pos);
@@ -214,7 +215,7 @@ namespace {
 
         const GW::Agent* closest = nullptr;
         for (const auto agent : *agents) {
-            if (agent == me || !GW::Agents::GetAgentMatchesFlags(agent, AgentEETargetType)) {
+            if (agent == me || !ToolboxUtils::MatchesTargetFilter(agent, AgentEETargetType)) {
                 continue;
             }
             const float this_distance = GetSquareDistance(me->pos, agent->pos);
@@ -307,8 +308,9 @@ namespace {
     constexpr auto pref_syntax = "'/pref [preference] [number (0-4)]' set the in-game preference setting in Guild Wars.\n'/pref list' to list the preferences available to set.";
 
     constexpr auto tb_syntax = "'/tb <name>' toggles the window or widget titled <name>.\n"
-                               "'/tb save [profile]' saves current Toolbox settings to disk; if [profile] is given, write to that profile, otherwise write to the default config.\n"
+                               "'/tb save [profile]' saves current Toolbox settings to disk; if [profile] is given, write to that profile without loading it, otherwise write to the active profile.\n"
                                "'/tb load [profile]' loads Toolbox settings from disk; if [profile] is given, read from that profile, otherwise read from the default config.\n"
+                               "'/tb global save|load' saves or loads module enablement, enabled plugins, and hotkey definitions shared by all profiles.\n"
                                "'/tb reset' moves Toolbox and Settings window to the top-left corner.\n"
                                "'/tb quit' or '/tb exit' completely closes toolbox and all its windows.";
 
@@ -744,11 +746,13 @@ namespace {
     };
 
     std::vector<CmdAlias*> cmd_aliases;
+    std::recursive_mutex cmd_aliases_mutex;
 
     ChatCommands::Settings settings;
 
     void sort_cmd_aliases()
     {
+        const std::scoped_lock lock(cmd_aliases_mutex);
         std::ranges::stable_sort(cmd_aliases, [](const auto* a, const auto* b) {
             if (a->alias_cstr[0] == '\0' && b->alias_cstr[0] != '\0') {
                 return false;
@@ -765,6 +769,7 @@ namespace {
 
     void OnSendChat(GW::HookStatus* status, GW::UI::UIMessage message_id, void* wparam, void*)
     {
+        const std::scoped_lock lock(cmd_aliases_mutex);
         ASSERT(message_id == GW::UI::UIMessage::kSendChatMessage);
         const auto message = static_cast<GW::UI::UIPacket::kSendChatMessage*>(wparam)->message;
         if (!(message && *message)) return;
@@ -821,17 +826,8 @@ namespace {
         for (const GW::Agent* agent : *agents) {
             if (!agent || agent == me) continue;
 
-            if (model_id) {
-                if (GetAgentModelId(agent) != model_id) continue;
-
-                const auto living = agent->GetAsAgentLiving();
-                if (type == GW::TargetFilter::AnyLiving || type == (GW::TargetFilter::AnyLiving & ~GW::AgentTargetFlags::Accept_Player)) {
-                    if (!living || living->GetIsDead()) continue;
-                }
-            }
-            else {
-                if (!GW::Agents::GetAgentMatchesFlags(agent, type)) continue;
-            }
+            if (model_id && GetAgentModelId(agent) != model_id) continue;
+            if (!ToolboxUtils::MatchesTargetFilter(agent, type)) continue;
 
             if (index == 0) {
                 const float new_distance = GetSquareDistance(me->pos, agent->pos);
@@ -1781,6 +1777,7 @@ namespace {
 
 void ChatCommands::CreateAlias(const wchar_t* alias, const wchar_t* message)
 {
+    const std::scoped_lock lock(cmd_aliases_mutex);
     if (alias && *alias == L'/') alias++;
     if (!(alias && *alias && message && *message)) return;
     const auto found = std::ranges::find_if(cmd_aliases, [alias, message](const CmdAlias* cmp) {
@@ -1811,6 +1808,7 @@ void ChatCommands::DrawHelp()
 
 void ChatCommands::DrawSettingsInternal()
 {
+    const std::scoped_lock lock(cmd_aliases_mutex);
     std::string preview = "Select...";
     switch (settings.default_title_id) {
         case CMDTITLE_KEEP_CURRENT:
@@ -1902,6 +1900,7 @@ void ChatCommands::DrawSettingsInternal()
 
 void ChatCommands::LoadSettings(SettingsDoc& doc, ToolboxIni* ini)
 {
+    const std::scoped_lock lock(cmd_aliases_mutex);
     ToolboxModule::LoadSettings(doc, ini);
     doc.GetStruct(Name(), settings);
 
@@ -1952,6 +1951,7 @@ void ChatCommands::LoadSettings(SettingsDoc& doc, ToolboxIni* ini)
 
 void ChatCommands::SaveSettings(SettingsDoc& doc)
 {
+    const std::scoped_lock lock(cmd_aliases_mutex);
     ToolboxModule::SaveSettings(doc);
     doc.SetStruct(Name(), settings);
 
@@ -2070,6 +2070,7 @@ void ChatCommands::Terminate()
         delete it;
     }
     title_names.clear();
+    const std::scoped_lock lock(cmd_aliases_mutex);
     for (const auto it : cmd_aliases) {
         delete it;
     }
@@ -2165,7 +2166,7 @@ void SearchAgent::Add(const wchar_t* _search, const GW::AgentTargetFlags type)
     if (!agents) return;
 
     for (const auto agent : *agents) {
-        if (!GW::Agents::GetAgentMatchesFlags(agent, type)) continue;
+        if (!ToolboxUtils::MatchesTargetFilter(agent, type)) continue;
         if (std::ranges::any_of(npc_names, [agent](const auto& n) { return n.first == agent->agent_id; })) {
             continue; // already queued for decoding by an earlier query
         }
@@ -2205,7 +2206,7 @@ void SearchAgent::Update()
         const auto name = TextUtils::ToLower(enc->wstring());
         // Match a term only against agents of the type it was queued with, so each /target type stays scoped.
         const auto matches = std::ranges::any_of(queries, [&](const Query& q) {
-            return name.find(q.search) != std::wstring::npos && GW::Agents::GetAgentMatchesFlags(agent, q.type);
+            return name.find(q.search) != std::wstring::npos && ToolboxUtils::MatchesTargetFilter(agent, q.type);
         });
         if (!matches) {
             continue;
@@ -2436,21 +2437,16 @@ void CHAT_CMD_FUNC(ChatCommands::CmdTB)
         }
         else if (arg1 == L"save") {
             // e.g. /tb save
-            GWToolbox::SetSettingsFolder({});
-            const auto file_location = GWToolbox::SaveSettings();
-            const auto dir = file_location.parent_path();
-            const auto dirstr = dir.wstring();
-            const auto printable = TextUtils::str_replace_all(dirstr, LR"(\)", L"/");
-            Log::InfoW(L"Settings saved to [%s;file://%s]", printable.c_str(), printable.c_str());
+            std::string error;
+            if (!ConfigProfiles::QueueSaveCurrentProfile(&error)) Log::Error("%s", error.c_str());
         }
         else if (arg1 == L"load") {
             // e.g. /tb load
-            GWToolbox::SetSettingsFolder({});
-            const auto file_location = GWToolbox::LoadSettings();
-            const auto dir = file_location.parent_path();
-            const auto dirstr = dir.wstring();
-            const auto printable = TextUtils::str_replace_all(dirstr, LR"(\)", L"/");
-            Log::InfoW(L"Settings loaded from [%s;file://%s]", printable.c_str() ,printable.c_str());
+            std::string error;
+            if (!ConfigProfiles::QueueLoadProfile("", &error)) Log::Error("%s", error.c_str());
+        }
+        else if (arg1 == L"global") {
+            Log::Error("%s", tb_syntax);
         }
         else if (arg1 == L"reset") {
             // e.g. /tb reset
@@ -2478,6 +2474,36 @@ void CHAT_CMD_FUNC(ChatCommands::CmdTB)
                 window->visible ^= 1;
             }
         }
+        return;
+    }
+    if (arg1 == L"global") {
+        if (argc != 3) {
+            Log::Error(tb_syntax);
+            return;
+        }
+        const auto action = TextUtils::ToLower(argv[2]);
+        std::string error;
+        const auto queued = action == L"save"
+            ? ConfigProfiles::QueueSaveGlobalSettings(&error)
+            : action == L"load"
+                ? ConfigProfiles::QueueLoadGlobalSettings(&error)
+                : false;
+        if (!queued) Log::Error("%s", error.empty() ? tb_syntax : error.c_str());
+        return;
+    }
+    if (arg1 == L"save" || arg1 == L"load") {
+        if (argc != 3) {
+            Log::Error(tb_syntax);
+            return;
+        }
+        std::string error;
+        // e.g. /tb save pure
+        // e.g. /tb load tas
+        const auto profile = TextUtils::WStringToString(argv[2]);
+        const auto queued = arg1 == L"save"
+            ? ConfigProfiles::QueueSaveProfile(profile, &error)
+            : ConfigProfiles::QueueLoadProfile(profile, &error);
+        if (!queued) Log::Error("%s", error.c_str());
         return;
     }
     const std::vector<ToolboxUIElement*> windows = MatchingWindows(status, message, argc, argv);
@@ -2511,37 +2537,6 @@ void CHAT_CMD_FUNC(ChatCommands::CmdTB)
         for (const auto& window : windows) {
             ImGui::SetWindowCollapsed(window->Name(), false);
         }
-    }
-    else if (arg1 == L"save") {
-        // e.g. /tb save pure
-        const auto sanitised_foldername = TextUtils::SanitiseFilename(arg2);
-        GWToolbox::SetSettingsFolder(sanitised_foldername);
-        const auto file_location = GWToolbox::SaveSettings();
-        const auto dir = file_location.parent_path();
-        const auto dirstr = dir.wstring();
-        const auto printable = TextUtils::str_replace_all(dirstr, LR"(\)", L"/");
-        Log::InfoW(L"Settings saved to %s", printable.c_str());
-    }
-    else if (arg1 == L"load") {
-        // e.g. /tb load tas
-        const auto sanitised_foldername = TextUtils::SanitiseFilename(arg2);
-        const auto old_settings_folder = Resources::GetSettingsFolderName();
-        GWToolbox::SetSettingsFolder(sanitised_foldername);
-        // A config exists if it has split per-module files, a legacy single-doc json, or a legacy ini
-        std::error_code ec;
-        const auto modules_folder = Resources::GetSettingFile(GWTOOLBOX_MODULES_FOLDERNAME);
-        const bool has_settings = (std::filesystem::exists(modules_folder, ec) && !std::filesystem::is_empty(modules_folder, ec)) || std::filesystem::exists(Resources::GetSettingFile(GWTOOLBOX_JSON_FILENAME), ec) ||
-                                  std::filesystem::exists(Resources::GetLegacySettingFile(GWTOOLBOX_JSON_FILENAME), ec) || std::filesystem::exists(Resources::GetLegacySettingFile(GWTOOLBOX_INI_FILENAME), ec);
-        if (!has_settings) {
-            Log::ErrorW(L"Settings folder '%s' does not exist", arg2.c_str());
-            GWToolbox::SetSettingsFolder(old_settings_folder);
-            return;
-        }
-        const auto file_location = GWToolbox::LoadSettings();
-        const auto dir = file_location.parent_path();
-        const auto dirstr = dir.wstring();
-        const auto printable = TextUtils::str_replace_all(dirstr, LR"(\)", L"/");
-        Log::InfoW(L"Settings loaded from %s", printable.c_str());
     }
     else {
         // Invalid argument

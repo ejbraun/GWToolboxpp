@@ -226,7 +226,8 @@ public:
 private:
     GoToTargetFinishCondition finishCondition = GoToTargetFinishCondition::DialogOpen;
 
-    const GW::AgentLiving* target = nullptr;
+    GW::AgentID target_id = 0;
+    std::chrono::steady_clock::time_point started_at{};
     mutable bool dialogHasPoppedUp = false;
 };
 
@@ -323,6 +324,7 @@ private:
     mutable GW::HookEntry hook;
     mutable bool agentHasSpawned = false;
     mutable bool hasUsedItem = false;
+    std::chrono::steady_clock::time_point started_at{};
 };
 
 class PingHardModeAction : public Action {
@@ -584,6 +586,7 @@ private:
     GW::GamePos targetPosition{};
     MovementDirection movementDirection = MovementDirection::Right;
     mutable bool startedWalking = false;
+    std::chrono::steady_clock::time_point started_at{};
 };
 
 class RandomAction : public Action {

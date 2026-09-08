@@ -56,6 +56,9 @@ Displays various pieces of useful information.
 ## Materials ([more info](/docs/materials/))
 Automatically buys materials from the trader.
 
+## Objectives ([more info](/docs/objective_timer/))
+Tracks objectives and timing for supported runs, with collapsible run details and saved history.
+
 ## Settings ([more info](/docs/settings/))
 All Toolbox settings can be found here.
 

@@ -682,6 +682,12 @@ namespace PluginUtils {
         return dest;
     }
 
+    std::wstring StripTags(const std::wstring_view str)
+    {
+        static const std::wregex tags(L"<[^>]+>");
+        return std::regex_replace(std::wstring(str), tags, L"");
+    }
+
     void EncString::reset(const uint32_t _enc_string_id, const bool sanitise)
     {
         if (_enc_string_id && encoded_ws.length()) {
@@ -739,8 +745,7 @@ namespace PluginUtils {
     {
         if (!sanitised && !decoded_ws.empty()) {
             sanitised = true;
-            static const std::wregex sanitiser(L"<[^>]+>");
-            decoded_ws = std::regex_replace(decoded_ws, sanitiser, L"");
+            decoded_ws = StripTags(decoded_ws);
         }
     }
 

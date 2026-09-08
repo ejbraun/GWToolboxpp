@@ -21,6 +21,9 @@ public:
     [[nodiscard]] const char* Icon() const override { return ICON_FA_TOOLBOX; }
 
     static void LoadModules(ToolboxIni* ini);
+    static bool LoadGlobalSettings(SettingsDoc& doc, ToolboxIni* legacy);
+    static void SaveGlobalSettings(SettingsDoc& doc);
+    static void RemoveGlobalSettings(SettingsDoc& doc);
 
     // The "Enable the following features" checkboxes as {name, description}, for settings search
     static const std::vector<std::pair<const char*, const char*>>& GetOptionalModuleToggles();

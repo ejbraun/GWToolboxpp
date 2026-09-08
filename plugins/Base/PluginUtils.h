@@ -49,6 +49,7 @@ namespace PluginUtils {
     std::wstring StringToWString(const std::string& s);
     std::string SanitiseFilename(const std::string& str);
     std::wstring SanitiseFilename(const std::wstring& str);
+    std::wstring StripTags(std::wstring_view str);
 
     std::wstring SanitizePlayerName(const std::wstring& s);
 

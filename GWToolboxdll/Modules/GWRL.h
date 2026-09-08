@@ -2,6 +2,7 @@
 #include <ToolboxModule.h>
 #include <Utils/GwrlTransport.h>
 #include <mutex>
+#include <GWRL/Router.h>
 
 class GWRL final : public ToolboxModule {
 public:
@@ -14,6 +15,10 @@ public:
     void Update(float) override;
     void Draw(IDirect3DDevice9*) override;
     void DrawSettingsInternal() override;
+    const GwrlApi* RoutingApi() const { return router_.Api(); }
+    void OpenRoutes(uintptr_t owner) { router_.OpenOwner(owner); }
+    void CloseRoutes(uintptr_t owner) { router_.CloseOwner(owner); }
+    bool RoutesDrained(uintptr_t owner) const { return router_.OwnerDrained(owner); }
 
 private:
     void Handle(const Gwrl::Message& request);
@@ -23,12 +28,15 @@ private:
     void DrawStatus();
     mutable std::recursive_mutex mutex_;
     Gwrl::Transport transport_;
+    Gwrl::Router router_{transport_};
     Gwrl::Artifact toolbox_;
     std::vector<Gwrl::Artifact> available_, original_, expected_;
     std::string session_, transaction_, state_ = "idle", detail_;
     std::string last_response_, pending_request_;
     std::vector<std::string> announced_versions_;
     uint64_t request_sent_ = 0;
+    uint64_t last_send_ticket_ = 0, shutdown_ticket_ = 0;
+    uint64_t routing_diagnostic_count_ = 0, next_routing_diagnostic_ = 0;
     bool request_acknowledged_ = false;
     std::unordered_map<std::string, std::pair<std::string, std::string>> replies_;
     uint64_t generation_ = 0, last_received_ = 0, next_ping_ = 0, request_number_ = 0;

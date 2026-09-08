@@ -4,6 +4,7 @@
 
 #include <Modules/Resources.h>
 #include <Modules/ToolboxTheme.h>
+#include <Utils/FilePersistence.h>
 
 #include "GWToolbox.h"
 #include <ImGuiAddons.h>
@@ -36,41 +37,85 @@ namespace {
         if (!reload_from_disk && !GWToolbox::SettingsFolderChanged()) {
             return *out;
         }
-        if (!exists(path)) {
+        const FilePersistence::ScopedConfigLock config_lock;
+        if (!config_lock.Acquired()) {
+            Log::Warning("Unable to load legacy theme settings: %s", config_lock.Error().c_str());
+            return *out;
+        }
+        std::error_code ec;
+        if (!std::filesystem::exists(path, ec)) {
             Log::LogW(L"File %s doesn't exist.", path.c_str());
+            if (reload_from_disk) {
+                delete *out;
+                *out = new ToolboxIni(false, false, false);
+            }
             return *out;
         }
         const auto tmp = new ToolboxIni(false, false, false);
-        ASSERT(tmp->LoadIfExists(path) == SI_OK);
+        if (tmp->LoadIfExists(path) != SI_OK) {
+            Log::WarningW(L"Unable to load legacy theme settings from %s", path.c_str());
+            delete tmp;
+            if (reload_from_disk) {
+                delete *out;
+                *out = new ToolboxIni(false, false, false);
+            }
+            return *out;
+        }
         delete *out;
         *out = tmp;
         return *out;
     }
 
     template <typename T>
-    bool ReadJsonFile(const std::filesystem::path& path, T& value)
+    bool ReadJsonFile(const std::filesystem::path& path, T& value, std::string& error)
     {
+        error.clear();
+        const FilePersistence::ScopedConfigLock config_lock;
+        if (!config_lock.Acquired()) {
+            error = config_lock.Error();
+            return false;
+        }
+        std::error_code ec;
+        const auto file_exists = std::filesystem::exists(path, ec);
+        if (ec) {
+            error = std::format("Unable to inspect '{}': {}", path.string(), ec.message());
+            return false;
+        }
+        if (!file_exists) return false;
         std::ifstream file(path, std::ios::binary);
         if (!file) {
+            error = std::format("Unable to open '{}'", path.string());
             return false;
         }
         const std::string buffer{std::istreambuf_iterator(file), {}};
-        return !glz::read<glz::opts{.error_on_unknown_keys = false}>(value, buffer);
+        auto staged = value;
+        if (!file.good() && !file.eof()) {
+            error = std::format("Unable to read '{}'", path.string());
+            return false;
+        }
+        if (glz::read<glz::opts{.error_on_unknown_keys = false}>(staged, buffer)) {
+            error = std::format("Unable to parse '{}'", path.string());
+            return false;
+        }
+        value = std::move(staged);
+        return true;
     }
 
     template <typename T>
-    bool WriteJsonFile(const std::filesystem::path& path, const T& value)
+    bool WriteJsonFile(const std::filesystem::path& path, const T& value, std::string& error)
     {
+        error.clear();
         std::string buffer;
         if (glz::write<glz::opts{.prettify = true}>(value, buffer)) {
+            error = std::format("Unable to serialise '{}'", path.string());
             return false;
         }
-        std::ofstream file(path, std::ios::binary | std::ios::trunc);
-        if (!file) {
+        const FilePersistence::ScopedConfigLock config_lock;
+        if (!config_lock.Acquired()) {
+            error = config_lock.Error();
             return false;
         }
-        file.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-        return file.good();
+        return FilePersistence::AtomicWrite(path, buffer, error);
     }
 
     ToolboxTheme::ThemeSettings ThemeFromStyle(const ImGuiStyle& style, const float font_scale)
@@ -169,21 +214,28 @@ void ToolboxTheme::Terminate()
 // Theme values live in Theme.json (a separate, shareable file), not in the SettingsDoc
 void ToolboxTheme::LoadSettings(SettingsDoc& doc, ToolboxIni* legacy)
 {
+    last_load_succeeded_ = true;
     ToolboxUIElement::LoadSettings(doc, legacy);
 
     const auto json_path = Resources::GetSettingFile(ThemeJsonFilename);
-    if (std::filesystem::exists(json_path)) {
-        // Seed from the current style so keys missing from the file keep their values
-        auto theme = ThemeFromStyle(ini_style, font_scale_main);
-        if (ReadJsonFile(json_path, theme)) {
-            font_scale_main = theme.FontGlobalScale;
-            ApplyThemeToStyle(theme, ini_style);
-            ini_style.Alpha = std::min(std::max(ini_style.Alpha, 0.2f), 1.0f); // clamp to [0.2, 1.0]
-            layout_dirty = true;
-            return;
-        }
+    // Seed from the current style so keys missing from the file keep their values
+    auto theme = ThemeFromStyle(ini_style, font_scale_main);
+    std::string error;
+    if (ReadJsonFile(json_path, theme, error)) {
+        font_scale_main = theme.FontGlobalScale;
+        ApplyThemeToStyle(theme, ini_style);
+        ini_style.Alpha = std::min(std::max(ini_style.Alpha, 0.2f), 1.0f); // clamp to [0.2, 1.0]
+        layout_dirty = true;
+        return;
+    }
+    if (!error.empty()) {
+        last_load_succeeded_ = false;
+        Log::Warning("Unable to load theme: %s", error.c_str());
+        return;
     }
 
+    ini_style = DefaultTheme();
+    font_scale_main = 1.0f;
     const auto inifile = GetThemeIni();
     if (!inifile) {
         ini_style = DefaultTheme();
@@ -251,7 +303,11 @@ void ToolboxTheme::SaveUILayout()
             .collapsed = window->Collapsed
         };
     }
-    ASSERT(WriteJsonFile(Resources::GetSettingFile(LayoutJsonFilename), layout));
+    std::string error;
+    if (!WriteJsonFile(Resources::GetSettingFile(LayoutJsonFilename), layout, error)) {
+        last_save_succeeded_ = false;
+        Log::Error("Unable to save window layout: %s", error.c_str());
+    }
 }
 
 ToolboxIni* ToolboxTheme::GetLayoutIni(const bool reload)
@@ -272,10 +328,12 @@ void ToolboxTheme::LoadUILayout()
     ImGui::GetStyle() = ini_style;
     ImGui::GetStyle().FontScaleMain = font_scale_main;
 
-    layout.clear();
     const auto json_path = Resources::GetSettingFile(LayoutJsonFilename);
-    const bool json_loaded = std::filesystem::exists(json_path) && ReadJsonFile(json_path, layout);
+    auto staged_layout = decltype(layout){};
+    std::string error;
+    const auto json_loaded = ReadJsonFile(json_path, staged_layout, error);
     if (json_loaded) {
+        layout = std::move(staged_layout);
         // Repair entries an earlier fallback keyed by full window name; stable-id entries are newer and win
         std::map<std::string, WindowLayout> normalized;
         for (const auto& [name, entry] : layout) {
@@ -292,45 +350,52 @@ void ToolboxTheme::LoadUILayout()
         layout = std::move(normalized);
     }
     if (!json_loaded) {
-        // Legacy fallback: convert Layout.ini's _<save_id>_X/_Y/_W/_H/_Collapsed keys.
-        // save_id is the stable identifier (part after ### or ## in the window name, or the full name).
-        const auto ini = GetLayoutIni();
-        const auto window_ini_section = "Windows";
+        layout.clear();
+        if (!error.empty()) {
+            last_load_succeeded_ = false;
+            Log::Warning("Unable to load window layout: %s", error.c_str());
+        }
+        else {
+            // Legacy fallback: convert Layout.ini's _<save_id>_X/_Y/_W/_H/_Collapsed keys.
+            // save_id is the stable identifier (part after ### or ## in the window name, or the full name).
+            const auto ini = GetLayoutIni();
+            const auto window_ini_section = "Windows";
 
-        TNamesDepend keys;
-        ini->GetAllKeys(window_ini_section, keys);
+            TNamesDepend keys;
+            ini->GetAllKeys(window_ini_section, keys);
 
-        for (const auto& key : keys) {
-            const char* k = key.pItem;
-            if (k[0] != '_') continue;
+            for (const auto& key : keys) {
+                const char* k = key.pItem;
+                if (k[0] != '_') continue;
 
-            // Only process _X keys to avoid visiting each window 5 times.
-            const size_t klen = strlen(k);
-            if (klen < 3 || k[klen - 2] != '_' || k[klen - 1] != 'X') continue;
+                // Only process _X keys to avoid visiting each window 5 times.
+                const size_t klen = strlen(k);
+                if (klen < 3 || k[klen - 2] != '_' || k[klen - 1] != 'X') continue;
 
-            // Extract window name: strip leading _ and trailing _X
-            const std::string window_name(k + 1, klen - 3);
-            if (window_name.empty()) continue;
+                // Extract window name: strip leading _ and trailing _X
+                const std::string window_name(k + 1, klen - 3);
+                if (window_name.empty()) continue;
 
-            // Old versions keyed entries by full window name (e.g. "My Build###teambuild_1");
-            // normalise to the stable save id so lookups and re-saves use the same key.
-            const std::string save_id = GetWindowSaveId(window_name.c_str());
-            if (save_id.empty()) continue;
+                // Old versions keyed entries by full window name (e.g. "My Build###teambuild_1");
+                // normalise to the stable save id so lookups and re-saves use the same key.
+                const std::string save_id = GetWindowSaveId(window_name.c_str());
+                if (save_id.empty()) continue;
 
-            WindowLayout entry;
-            char key_buf[128];
-            snprintf(key_buf, sizeof(key_buf), "_%s_X", window_name.c_str());
-            entry.pos[0] = static_cast<float>(ini->GetDoubleValue(window_ini_section, key_buf, 0.0f));
-            snprintf(key_buf, sizeof(key_buf), "_%s_Y", window_name.c_str());
-            entry.pos[1] = static_cast<float>(ini->GetDoubleValue(window_ini_section, key_buf, 0.0f));
-            snprintf(key_buf, sizeof(key_buf), "_%s_W", window_name.c_str());
-            entry.size[0] = static_cast<float>(ini->GetDoubleValue(window_ini_section, key_buf, 0.0f));
-            snprintf(key_buf, sizeof(key_buf), "_%s_H", window_name.c_str());
-            entry.size[1] = static_cast<float>(ini->GetDoubleValue(window_ini_section, key_buf, 0.0f));
-            snprintf(key_buf, sizeof(key_buf), "_%s_Collapsed", window_name.c_str());
-            entry.collapsed = ini->GetBoolValue(window_ini_section, key_buf, false);
+                WindowLayout entry;
+                char key_buf[128];
+                snprintf(key_buf, sizeof(key_buf), "_%s_X", window_name.c_str());
+                entry.pos[0] = static_cast<float>(ini->GetDoubleValue(window_ini_section, key_buf, 0.0f));
+                snprintf(key_buf, sizeof(key_buf), "_%s_Y", window_name.c_str());
+                entry.pos[1] = static_cast<float>(ini->GetDoubleValue(window_ini_section, key_buf, 0.0f));
+                snprintf(key_buf, sizeof(key_buf), "_%s_W", window_name.c_str());
+                entry.size[0] = static_cast<float>(ini->GetDoubleValue(window_ini_section, key_buf, 0.0f));
+                snprintf(key_buf, sizeof(key_buf), "_%s_H", window_name.c_str());
+                entry.size[1] = static_cast<float>(ini->GetDoubleValue(window_ini_section, key_buf, 0.0f));
+                snprintf(key_buf, sizeof(key_buf), "_%s_Collapsed", window_name.c_str());
+                entry.collapsed = ini->GetBoolValue(window_ini_section, key_buf, false);
 
-            layout[save_id] = entry;
+                layout[save_id] = entry;
+            }
         }
     }
 
@@ -390,7 +455,14 @@ void ToolboxTheme::ApplyWindowSettings(ImGuiWindow* window) const
 
 void ToolboxTheme::SaveSettings(SettingsDoc& doc)
 {
+    last_save_succeeded_ = true;
     ToolboxUIElement::SaveSettings(doc);
+
+    if (!last_load_succeeded_) {
+        last_save_succeeded_ = false;
+        Log::Error("Theme and layout were not saved because the current profile did not load safely");
+        return;
+    }
 
     if (!ImGui::GetCurrentContext() || !imgui_style_loaded) {
         return; // Imgui not initialised, can happen if destructing before first draw
@@ -398,7 +470,11 @@ void ToolboxTheme::SaveSettings(SettingsDoc& doc)
 
     const ImGuiStyle& style = ImGui::GetStyle();
     const auto theme = ThemeFromStyle(style, ImGui::FontScale());
-    ASSERT(WriteJsonFile(Resources::GetSettingFile(ThemeJsonFilename), theme));
+    std::string error;
+    if (!WriteJsonFile(Resources::GetSettingFile(ThemeJsonFilename), theme, error)) {
+        last_save_succeeded_ = false;
+        Log::Error("Unable to save theme: %s", error.c_str());
+    }
 
     SaveUILayout();
 }

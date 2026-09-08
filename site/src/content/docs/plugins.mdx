@@ -12,11 +12,21 @@ GWRLauncher manages installation and updates for artifacts supported by its back
 
 DBBox reports its integer version in the plugin list and Windows file properties. Existing plugins without version metadata can still load under their existing interface.
 
+The enabled plugin list and plugin-owned settings are computer-global rather than profile-specific. Enabling or disabling a plugin updates the global selection immediately; `/tb global save` and `/tb global load` provide explicit control without affecting the active config profile.
+
 ## DBBox features
 
 Expand DBBox to enable or disable individual features. Each has its own instance, settings and shutdown lifecycle. **Stopping...** means pending work is draining. Visibility hides a feature's UI without disabling it.
 
 The [Tactical Minimap](/docs/tactical_minimap/) is disabled by default and has its own opacity, controls and renderer. Its settings do not modify Toolbox's built-in minimap or Mission Map.
+
+[Speedrun Scripting Tools](/docs/speedrun_scripting/) runs triggered action sequences and reports failed actions that would otherwise block later scripts.
+
+[Dhuum Calculator](/docs/dhuum_calculator/) estimates damage and Rest completion from the current Underworld encounter and resets its tracking when the instance changes.
+
+[Pits and Souls](/docs/pits_souls/) estimates Chained Soul death and respawn times at Bottom, Double and Reaper, continuing its estimates after leaving compass range.
+
+Decoded names used by DBBox features, including ArmorSwap item choices and Loot Notifier's window, notifications and GZ messages, use plain text without Guild Wars formatting tags. SST dialogue conditions also match the visible text after those tags are removed.
 
 ## Updates and crash reports
 

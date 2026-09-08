@@ -1,34 +1,11 @@
 #pragma once
+#include <GWRL/Wire.h>
 #include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
 
 namespace Gwrl {
-    inline constexpr uint32_t Magic = 0x4c525747;
-    inline constexpr uint16_t Major = 1;
-    inline constexpr uint16_t Minor = 0;
-    inline constexpr uint32_t MaximumPayload = 65536;
-    inline constexpr uint32_t MaximumQueue = 64;
-
-    struct Bootstrap {
-        uint32_t magic = Magic;
-        uint16_t major = Major;
-        uint16_t minor = Minor;
-        uint32_t size = sizeof(Bootstrap);
-        uint32_t published = 0;
-        uint32_t controller_pid = 0;
-        uint32_t target_pid = 0;
-        uint64_t controller_started = 0;
-        uint64_t target_started = 0;
-        char session_id[33]{};
-        char transaction_id[65]{};
-        uint16_t reserved = 0;
-        uint32_t hold_plugins = 0;
-        wchar_t pipe_name[192]{};
-    };
-    static_assert(sizeof(Bootstrap) == 528);
-
     struct Artifact {
         std::string name;
         uint32_t version = 0;
@@ -56,17 +33,9 @@ namespace Gwrl {
         std::string code;
         std::vector<std::string> capabilities;
         std::vector<Artifact> artifacts;
+        std::optional<std::string> recipient;
+        std::optional<glz::raw_json> routing;
     };
-
-    inline bool IsIdentifier(const std::string& value, const size_t maximum = 64)
-    {
-        if (value.empty() || value.size() > maximum) return false;
-        for (const auto c : value) {
-            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z')
-                || (c >= 'A' && c <= 'Z') || c == '-' || c == '_')) return false;
-        }
-        return true;
-    }
 
     inline bool IsSha256(const std::string& value)
     {

@@ -26,6 +26,7 @@
 #include <Logger.h>
 #include <Timer.h>
 #include <Utils/AoeEffects.h>
+#include <Utils/FilePersistence.h>
 #include <Utils/GameWorldCompositor.h>
 #include <Utils/PropSurfaceIndex.h>
 #include <Utils/GuiUtils.h>
@@ -33,10 +34,12 @@
 
 #include <Modules/CameraUnlockModule.h>
 #include <Modules/ChatCommands.h>
+#include <Modules/ConfigProfiles.h>
 #include <Modules/ChatSettings.h>
 #include <Modules/CrashHandler.h>
 #include <Modules/DialogModule.h>
 #include <Modules/GameSettings.h>
+#include <Modules/GlobalSettings.h>
 #include <Modules/GwDatModule.h>
 #include <Modules/HallOfMonumentsModule.h>
 #include <Modules/InventoryManager.h>
@@ -72,6 +75,8 @@ namespace {
     utf8::string imgui_inifile;
     bool imgui_inifile_changed = false;
     bool settings_folder_changed = false;
+    bool settings_file_load_valid = true;
+    bool settings_doc_load_valid = true;
 
     bool must_self_destruct = false; // is true when toolbox should quit
     GW::HookEntry Update_Entry;
@@ -81,16 +86,84 @@ namespace {
     utf8::string GetImguiIniPath()
     {
         const auto path = Resources::GetSettingFile(L"interface.ini");
+        const FilePersistence::ScopedConfigLock config_lock;
+        if (!config_lock.Acquired()) return Unicode16ToUtf8(path.c_str());
         std::error_code ec;
         if (!std::filesystem::exists(path, ec)) {
             // Carry the window layout over from the pre-configs/default location
             const auto legacy = Resources::GetLegacySettingFile(L"interface.ini");
             if (std::filesystem::exists(legacy, ec)) {
-                Resources::EnsureFolderExists(path.parent_path());
-                std::filesystem::copy_file(legacy, path, ec);
+                std::ifstream file(legacy, std::ios::binary);
+                const auto buffer = std::string(std::istreambuf_iterator(file), {});
+                std::string error;
+                if (!file || file.bad()) {
+                    error = "Unable to read the legacy interface settings file";
+                }
+                else {
+                    FilePersistence::AtomicWrite(path, buffer, error);
+                }
+                if (!error.empty()) {
+                    Log::Warning("Unable to migrate interface settings: %s", error.c_str());
+                }
             }
         }
         return Unicode16ToUtf8(path.c_str());
+    }
+
+    bool LoadImguiSettings(std::string& error)
+    {
+        error.clear();
+        if (!ImGui::GetCurrentContext() || !imgui_inifile.bytes) return true;
+        const FilePersistence::ScopedConfigLock config_lock;
+        if (!config_lock.Acquired()) {
+            error = config_lock.Error();
+            return false;
+        }
+        const auto path = Resources::GetSettingFile(L"interface.ini");
+        std::error_code ec;
+        const auto file_exists = std::filesystem::exists(path, ec);
+        if (ec) {
+            error = std::format("Unable to inspect interface settings: {}", ec.message());
+            return false;
+        }
+        std::string buffer;
+        if (file_exists) {
+            std::ifstream file(path, std::ios::binary);
+            if (!file) {
+                error = "Unable to open interface settings";
+                return false;
+            }
+            buffer.assign(std::istreambuf_iterator(file), {});
+            if (file.bad()) {
+                error = "Unable to read interface settings";
+                return false;
+            }
+        }
+        ImGui::ClearIniSettings();
+        if (!buffer.empty()) ImGui::LoadIniSettingsFromMemory(buffer.data(), buffer.size());
+        return true;
+    }
+
+    bool SaveImguiSettings(std::string& error)
+    {
+        error.clear();
+        if (!ImGui::GetCurrentContext()) return true;
+        size_t settings_size = 0;
+        const auto settings = ImGui::SaveIniSettingsToMemory(&settings_size);
+        if (!settings) {
+            error = "Dear ImGui did not provide interface settings";
+            return false;
+        }
+        const FilePersistence::ScopedConfigLock config_lock;
+        if (!config_lock.Acquired()) {
+            error = config_lock.Error();
+            return false;
+        }
+        if (!FilePersistence::AtomicWrite(Resources::GetSettingFile(L"interface.ini"), std::string_view(settings, settings_size), error)) {
+            return false;
+        }
+        ImGui::GetIO().WantSaveIniSettings = false;
+        return true;
     }
 
     uint64_t QpcToMicroseconds(LONGLONG ticks)
@@ -184,7 +257,8 @@ namespace {
 
 
         io.MouseDrawCursor = false;
-        io.IniFilename = imgui_inifile.bytes;
+        // Toolbox owns persistence so ImGui cannot truncate a shared profile outside the config lock.
+        io.IniFilename = nullptr;
         // io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
         io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
         io.ConfigNavCaptureKeyboard = false;
@@ -192,6 +266,11 @@ namespace {
         // ImGui_ImplDX9_Init(GW::MemoryMgr().GetGWWindowHandle(), device);
         ImGui_ImplDX9_Init(device);
         ImGui_ImplWin32_Init(GW::MemoryMgr::GetGWWindowHandle());
+
+        std::string settings_error;
+        if (!LoadImguiSettings(settings_error)) {
+            Log::Warning("Unable to load interface settings: %s", settings_error.c_str());
+        }
 
         GW::Render::SetResetCallback([](IDirect3DDevice9*) {
             ImGui_ImplDX9_InvalidateDeviceObjects();
@@ -583,6 +662,7 @@ namespace {
         if (!(can_render_toolbox && GWToolbox::IsInitialized())) {
             return CallWindowProc(OldWndProc, hWnd, Message, wParam, lParam);
         }
+        const std::scoped_lock module_lock(module_management_mutex);
 
         auto& io = ImGui::GetIO();
 
@@ -933,25 +1013,34 @@ void GWToolbox::Initialize(LPVOID module)
 
 std::filesystem::path GWToolbox::LoadSettings()
 {
-    const auto ini = OpenSettingsFile();
-    const auto doc = GetSettingsDoc();
+    const std::scoped_lock module_lock(module_management_mutex);
+    const FilePersistence::ScopedConfigLock config_lock(10000);
+    if (!config_lock.Acquired()) {
+        Log::Warning("Unable to load Toolbox settings: %s", config_lock.Error().c_str());
+        return {};
+    }
+    const auto ini = OpenSettingsFile(true);
+    const auto doc = GetSettingsDoc(true);
+    if (!settings_file_load_valid || !settings_doc_load_valid) {
+        Log::Warning("Toolbox settings were not changed because the current profile could not be read safely");
+        return {};
+    }
     // Reset the flag so nested OpenSettingsFile() calls (via ToggleTBModule) don't
     // free and reallocate the ini we just loaded, causing a use-after-free.
     settings_folder_changed = false;
-    ToolboxSettings::Instance().LoadSettings(*doc, ini);
-    ToolboxSettings::LoadModules(ini);
     if (!ini->location_on_disk.empty()) {
         // Loaded sequentially on purpose, not threaded: a fixed load order keeps config loading deterministic, so a shared settings folder always reproduces the same behaviour and bugs aren't order-dependent. The ~100ms cost is negligible; revisit only if it ever causes noticeable lag.
-        for (const auto m : modules_enabled) {
-            m->LoadSettings(*doc, ini);
-        }
-        for (const auto m : widgets_enabled) {
-            m->LoadSettings(*doc, ini);
-        }
-        for (const auto m : windows_enabled) {
-            m->LoadSettings(*doc, ini);
+        const auto enabled_modules = modules_enabled;
+        for (const auto m : enabled_modules) {
+            if (IsModuleEnabled(m)) m->LoadSettings(*doc, ini);
         }
     }
+    std::string settings_error;
+    if (!LoadImguiSettings(settings_error)) {
+        Log::Warning("Unable to load interface settings: %s", settings_error.c_str());
+        return {};
+    }
+    imgui_inifile_changed = false;
     return doc->location_on_disk;
 }
 
@@ -994,11 +1083,28 @@ ToolboxIni* GWToolbox::OpenSettingsFile(bool fresh)
 {
     static ToolboxIni* inifile = nullptr;
     const auto full_path = Resources::GetLegacySettingFile(GWTOOLBOX_INI_FILENAME);
-    if (!SettingsFolderChanged() && inifile && !fresh) {
+    if (!SettingsFolderChanged() && inifile && !fresh && settings_file_load_valid) {
         return inifile;
     }
     auto tmp = new ToolboxIni(false, false, false);
-    ASSERT(tmp->LoadIfExists(full_path) == SI_OK);
+    const FilePersistence::ScopedConfigLock config_lock;
+    if (!config_lock.Acquired()) {
+        Log::Warning("Unable to load legacy Toolbox settings: %s", config_lock.Error().c_str());
+        delete tmp;
+        settings_file_load_valid = false;
+        if (inifile) return inifile;
+        tmp = new ToolboxIni(false, false, false);
+    }
+    else if (tmp->LoadIfExists(full_path) != SI_OK) {
+        Log::WarningW(L"Unable to load legacy Toolbox settings from %s", full_path.c_str());
+        delete tmp;
+        settings_file_load_valid = false;
+        if (inifile) return inifile;
+        tmp = new ToolboxIni(false, false, false);
+    }
+    else {
+        settings_file_load_valid = true;
+    }
     tmp->location_on_disk = full_path;
     if (inifile) delete inifile;
     inifile = tmp;
@@ -1009,11 +1115,20 @@ SettingsDoc* GWToolbox::GetSettingsDoc(bool fresh)
 {
     static SettingsDoc* doc = nullptr;
     const auto modules_path = Resources::GetSettingFile(GWTOOLBOX_MODULES_FOLDERNAME);
-    if (!SettingsFolderChanged() && doc && !fresh) {
+    if (!SettingsFolderChanged() && doc && !fresh && settings_doc_load_valid) {
         return doc;
     }
     auto tmp = new SettingsDoc();
-    tmp->LoadFolder(modules_path);
+    if (!tmp->LoadFolder(modules_path)) {
+        Log::WarningW(L"One or more Toolbox settings could not be loaded from %s", modules_path.c_str());
+        delete tmp;
+        settings_doc_load_valid = false;
+        if (doc) return doc;
+        tmp = new SettingsDoc();
+        tmp->location_on_disk = modules_path;
+        doc = tmp;
+        return doc;
+    }
     if (tmp->Empty()) {
         // One-time seed: pre-split installs kept all sections in a single GWToolbox.json
         auto seed_path = Resources::GetSettingFile(GWTOOLBOX_JSON_FILENAME);
@@ -1022,10 +1137,20 @@ SettingsDoc* GWToolbox::GetSettingsDoc(bool fresh)
             seed_path = Resources::GetLegacySettingFile(GWTOOLBOX_JSON_FILENAME);
         }
         if (std::filesystem::exists(seed_path, ec)) {
-            tmp->LoadFile(seed_path);
+            if (!tmp->LoadFile(seed_path)) {
+                Log::WarningW(L"Unable to load Toolbox settings seed from %s", seed_path.c_str());
+                delete tmp;
+                settings_doc_load_valid = false;
+                if (doc) return doc;
+                tmp = new SettingsDoc();
+                tmp->location_on_disk = modules_path;
+                doc = tmp;
+                return doc;
+            }
             tmp->location_on_disk = modules_path;
         }
     }
+    settings_doc_load_valid = true;
     if (doc) delete doc;
     doc = tmp;
     return doc;
@@ -1033,31 +1158,43 @@ SettingsDoc* GWToolbox::GetSettingsDoc(bool fresh)
 
 std::filesystem::path GWToolbox::SaveSettings()
 {
-    const auto ini = OpenSettingsFile();
+    const std::scoped_lock module_lock(module_management_mutex);
+    const FilePersistence::ScopedConfigLock config_lock(10000);
+    if (!config_lock.Acquired()) {
+        Log::Warning("Unable to save Toolbox settings: %s", config_lock.Error().c_str());
+        return {};
+    }
+    OpenSettingsFile();
     const auto doc = GetSettingsDoc(true);
-    for (const auto m : modules_enabled) {
-        m->SaveSettings(*doc);
+    if (!settings_file_load_valid || !settings_doc_load_valid) {
+        Log::Error("Toolbox settings were not saved because the current profile could not be read safely");
+        return {};
     }
-    for (const auto m : widgets_enabled) {
-        m->SaveSettings(*doc);
+    // Keep nested settings access from replacing the document while module state is serialized.
+    settings_folder_changed = false;
+    const auto enabled_modules = modules_enabled;
+    for (const auto m : enabled_modules) {
+        if (IsModuleEnabled(m)) m->SaveSettings(*doc);
     }
-    for (const auto m : windows_enabled) {
-        m->SaveSettings(*doc);
+    GlobalSettings::StripProfilePayloads(*doc);
+    const auto settings_saved = doc->SaveFolder();
+    const auto theme_saved = ToolboxTheme::Instance().LastSaveSucceeded();
+    std::string imgui_error;
+    const auto interface_saved = SaveImguiSettings(imgui_error);
+    if (!settings_saved) {
+        Log::Error("One or more Toolbox settings files could not be saved");
     }
-    ToolboxSettings::LoadModules(ini);
-    ASSERT(doc->SaveFolder());
-    if (ImGui::GetCurrentContext()) {
-        auto& io = ImGui::GetIO();
-        if (io.IniFilename) {
-            ImGui::SaveIniSettingsToDisk(io.IniFilename);
-        }
+    if (!interface_saved) {
+        Log::Error("Unable to save interface settings: %s", imgui_error.c_str());
     }
     const auto dir = doc->location_on_disk.parent_path();
     const auto dirstr = dir.wstring();
     const auto printable = TextUtils::str_replace_all(dirstr, LR"(\\)", L"/");
-    Log::LogW(L"Toolbox settings saved to %s", printable.c_str());
+    if (settings_saved && theme_saved && interface_saved) {
+        Log::LogW(L"Toolbox settings saved to %s", printable.c_str());
+    }
     settings_folder_changed = false;
-    return doc->location_on_disk;
+    return settings_saved && theme_saved && interface_saved ? doc->location_on_disk : std::filesystem::path{};
 }
 
 bool GWToolbox::IsProcessExiting()
@@ -1146,24 +1283,30 @@ void GWToolbox::Update(GW::HookStatus*)
             return;
     }
 
-    UpdateModulesTerminating(delta_f);
+    ConfigProfiles::ProcessGameThreadActions();
 
     Build::Update();
     // From Update rather than Draw so the per-frame memo keeps ticking while rendering is gated
     // (minimized, device lost) and a map change during that window can't serve a stale index.
     PropSurface::BeginFrame();
 
-    for (const auto m : modules_enabled) {
-        if (profiling_enabled) {
-            LARGE_INTEGER t0, t1;
-            QueryPerformanceCounter(&t0);
-            m->Update(delta_f);
-            QueryPerformanceCounter(&t1);
-            m->last_update_time_us_ = QpcToMicroseconds(t1.QuadPart - t0.QuadPart);
-            if (m->last_update_time_us_ > 60000) Log::Log("[hitch] %s::Update took %lld us", m->Name(), (long long)m->last_update_time_us_); // [perf-diag]
-        }
-        else {
-            m->Update(delta_f);
+    {
+        const std::scoped_lock module_lock(module_management_mutex);
+        UpdateModulesTerminating(delta_f);
+
+        // Update loop
+        for (const auto m : modules_enabled) {
+            if (profiling_enabled) {
+                LARGE_INTEGER t0, t1;
+                QueryPerformanceCounter(&t0);
+                m->Update(delta_f);
+                QueryPerformanceCounter(&t1);
+                m->last_update_time_us_ = QpcToMicroseconds(t1.QuadPart - t0.QuadPart);
+                if (m->last_update_time_us_ > 60000) Log::Log("[hitch] %s::Update took %lld us", m->Name(), (long long)m->last_update_time_us_); // [perf-diag]
+            }
+            else {
+                m->Update(delta_f);
+            }
         }
     }
 
@@ -1207,9 +1350,14 @@ void GWToolbox::Draw(IDirect3DDevice9* device)
     }
 
     if (imgui_inifile_changed) {
-        auto& io = ImGui::GetIO();
-        io.IniFilename = imgui_inifile.bytes;
-        imgui_inifile_changed = false;
+        ImGui::GetIO().IniFilename = nullptr;
+        std::string settings_error;
+        if (LoadImguiSettings(settings_error)) {
+            imgui_inifile_changed = false;
+        }
+        else {
+            Log::Warning("Unable to load interface settings: %s", settings_error.c_str());
+        }
     }
     if (gwtoolbox_disabled) {
         can_render_toolbox = false;
@@ -1224,6 +1372,7 @@ void GWToolbox::Draw(IDirect3DDevice9* device)
     }
 
     Resources::DxUpdate(device);
+    ConfigProfiles::ProcessPendingActions();
 
     can_render_toolbox = CanRenderToolbox();
     if (!can_render_toolbox) return;
@@ -1346,11 +1495,17 @@ void GWToolbox::UpdateInitialising(float)
     Resources::EnsureFolderExists(Resources::GetComputerFolderPath());
     Resources::EnsureFolderExists(Resources::GetPath(L"img"));
     Resources::EnsureFolderExists(Resources::GetPath(L"location logs"));
+    ConfigProfiles::PrepareInitialProfile();
     Resources::EnsureFolderExists(Resources::GetSettingsFolderPath());
 
     // if the file does not exist we'll load module settings once downloaded, but we need the file open
     // in order to read defaults
     const auto ini = OpenSettingsFile();
+    GetSettingsDoc();
+    if (!settings_file_load_valid || !settings_doc_load_valid) {
+        Log::Warning("Toolbox initialization is waiting for the settings profile to become readable");
+        return;
+    }
 
     Log::Log("Creating Modules\n");
     ToggleModule(CrashHandler::Instance());
@@ -1373,6 +1528,7 @@ void GWToolbox::UpdateInitialising(float)
     ToggleModule(SettingsWindow::Instance());
 
     ToolboxSettings::LoadModules(ini); // initialize all other modules as specified by the user
+    ConfigProfiles::Initialize();
 
     gwtoolbox_state = GWToolboxState::DrawInitialising;
 }
@@ -1395,6 +1551,7 @@ terminate_modules:
 void GWToolbox::UpdateTerminating(float delta_f)
 {
     ASSERT(gwtoolbox_state == GWToolboxState::Terminating);
+    ConfigProfiles::Terminate();
 
     while (modules_enabled.size()) {
         ASSERT(ToggleModule(*modules_enabled[0], false) == false);

@@ -1,4 +1,5 @@
 #include "AsyncStringDecoder.h"
+#include "PluginUtils.h"
 
 #include <GWCA/Managers/UIMgr.h>
 
@@ -17,7 +18,8 @@ namespace {
     {
         const auto context = static_cast<DecodeContext*>(rawContext);
         try {
-            context->completion(decoded);
+            const auto text = PluginUtils::StripTags(decoded ? decoded : L"");
+            context->completion(decoded ? text.c_str() : nullptr);
         }
         catch (...) {
             // Completion failures must not strand plugin shutdown.
@@ -27,11 +29,11 @@ namespace {
     }
 }
 
-void AsyncStringDecoder::Decode(const std::wstring_view encoded, Completion completion)
+void AsyncStringDecoder::Decode(const std::wstring_view encoded, Completion completion, const GW::Constants::Language language)
 {
     const auto context = new DecodeContext{std::wstring(encoded), std::move(completion)};
     ++pendingDecodes;
-    GW::UI::AsyncDecodeStr(context->encoded.c_str(), &OnDecoded, context);
+    GW::UI::AsyncDecodeStr(context->encoded.c_str(), &OnDecoded, context, language);
 }
 
 size_t AsyncStringDecoder::PendingCount()

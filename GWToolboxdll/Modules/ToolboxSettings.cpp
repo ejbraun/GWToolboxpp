@@ -11,6 +11,7 @@
 #include <Utils/GuiUtils.h>
 
 #include <Modules/ChatFilter.h>
+#include <Modules/ConfigProfiles.h>
 #include <Modules/DiscordModule.h>
 #include <Modules/HeroPanelPositionModule.h>
 #include <Modules/HintsModule.h>
@@ -35,6 +36,7 @@
 #include <Modules/FpsFix.h>
 #include <Modules/GamepadModule.h>
 #include <Modules/GuildWarsSettingsModule.h>
+#include <Modules/GlobalSettings.h>
 #include <Modules/ItemTooltipModule.h>
 #include <Modules/LoginModule.h>
 #ifdef _DEBUG
@@ -346,6 +348,9 @@ void ToolboxSettings::DrawSettingsInternal()
     ImGui::Unindent();
     ImGui::Separator();
 
+    ConfigProfiles::DrawSettings();
+    ImGui::Separator();
+
     Updater::Instance().DrawSettingsInternal();
     ImGui::Separator();
 
@@ -355,14 +360,17 @@ void ToolboxSettings::DrawSettingsInternal()
     ImGui::Separator();
     ImGui::PushID("global_enable");
     ImGui::TextUnformatted("Enable the following features:");
-    ImGui::TextDisabled("Unticking will completely disable a feature from initializing and running. Requires Toolbox restart.");
+    ImGui::TextDisabled("Changes apply immediately and are shared by every Toolbox profile.");
 
     auto items_per_col = static_cast<size_t>(ceil(optional_modules.size() / static_cast<float>(cols)));
     size_t col_count = 0;
     ImGui::Columns(static_cast<int>(cols), "global_enable_cols", false);
     for (auto& m : optional_modules) {
         if (ImGui::Checkbox(m.name, &m.enabled)) {
-            GWToolbox::SaveSettings();
+            std::string error;
+            if (!GlobalSettings::SaveModules(&error)) {
+                Log::Error("Unable to save global module settings: %s", error.c_str());
+            }
             const auto p = &m;
             GW::GameThread::Enqueue([p]() {
                 GWToolbox::ToggleModule(*p->toolbox_module, p->enabled);
@@ -416,16 +424,42 @@ void ToolboxSettings::LoadSettings(SettingsDoc& doc, ToolboxIni* legacy)
     }
     ToolboxModule::LoadSettings(doc, legacy);
 
+    std::string error;
+    if (!GlobalSettings::EnsureModulesLoaded(doc, legacy, &error)) {
+        Log::Warning("Unable to load global module settings: %s", error.c_str());
+    }
+}
+
+bool ToolboxSettings::LoadGlobalSettings(SettingsDoc& doc, ToolboxIni* legacy)
+{
     std::map<std::string, bool> enabled_modules;
-    doc.GetStruct(modules_ini_section, enabled_modules);
+    const auto has_json = doc.HasSection(modules_ini_section);
+    if (has_json && !doc.GetStruct(modules_ini_section, enabled_modules)) return false;
     for (auto& m : optional_modules) {
         const auto found = enabled_modules.find(m.name);
         if (found != enabled_modules.end()) {
             m.enabled = found->second;
         }
-        else if (legacy) {
+        else if (!has_json && legacy) {
             m.enabled = legacy->GetBoolValue(modules_ini_section, m.name, m.enabled);
         }
+    }
+    return true;
+}
+
+void ToolboxSettings::SaveGlobalSettings(SettingsDoc& doc)
+{
+    std::map<std::string, bool> enabled_modules;
+    for (const auto& m : optional_modules) {
+        enabled_modules[m.name] = m.enabled;
+    }
+    doc.SetStruct(modules_ini_section, enabled_modules);
+}
+
+void ToolboxSettings::RemoveGlobalSettings(SettingsDoc& doc)
+{
+    for (const auto& m : optional_modules) {
+        doc.EraseKey(modules_ini_section, m.name);
     }
 }
 
@@ -435,12 +469,6 @@ void ToolboxSettings::SaveSettings(SettingsDoc& doc)
         location_file.close();
     }
     ToolboxModule::SaveSettings(doc);
-
-    std::map<std::string, bool> enabled_modules;
-    for (const auto& m : optional_modules) {
-        enabled_modules[m.name] = m.enabled;
-    }
-    doc.SetStruct(modules_ini_section, enabled_modules);
 }
 
 void ToolboxSettings::Draw(IDirect3DDevice9*)
@@ -608,7 +636,12 @@ void ToolboxSettings::FlushPendingScreenshot(IDirect3DDevice9* device)
 
 void ToolboxSettings::Update(float)
 {
-    if (!(save_location_data && TIMER_DIFF(location_timer) > 1000)) return;
+    if (!save_location_data) {
+        if (location_file.is_open()) location_file.close();
+        location_current_map = GW::Constants::MapID::None;
+        return;
+    }
+    if (TIMER_DIFF(location_timer) <= 1000) return;
     location_timer = TIMER_INIT();
     if (GW::Map::GetInstanceType() != GW::Constants::InstanceType::Explorable) {
         location_current_map = GW::Constants::MapID::None;

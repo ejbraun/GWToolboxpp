@@ -4,6 +4,9 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <vector>
+
+#include <Utils/FilePersistence.h>
 
 namespace {
     // Canonical section key, also its <section>.json filename stem, so forbidden chars are stripped.
@@ -30,89 +33,97 @@ namespace {
 
 bool SettingsDoc::LoadFile(const std::filesystem::path& path)
 {
-    sections.clear();
+    std::string buffer;
+    auto file_exists = false;
+    {
+        const FilePersistence::ScopedConfigLock config_lock;
+        if (!config_lock.Acquired()) return false;
+        std::error_code ec;
+        file_exists = std::filesystem::exists(path, ec);
+        if (ec) return false;
+        if (file_exists) {
+            std::ifstream file(path, std::ios::binary);
+            if (!file) return false;
+            buffer.assign(std::istreambuf_iterator(file), {});
+            if (file.bad()) return false;
+        }
+    }
+
+    decltype(sections) staged;
+    if (file_exists && !buffer.empty() && glz::read<lenient_opts>(staged, buffer)) return false;
+    sections = std::move(staged);
     location_on_disk = path;
-    std::error_code ec;
-    if (!std::filesystem::exists(path, ec)) {
-        return true;
-    }
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        return false;
-    }
-    const std::string buffer{std::istreambuf_iterator(file), {}};
-    if (buffer.empty()) {
-        return true;
-    }
-    if (glz::read<lenient_opts>(sections, buffer)) {
-        sections.clear();
-        return false;
-    }
     return true;
 }
 
 bool SettingsDoc::SaveFile(const std::filesystem::path& path) const
 {
     std::string buffer;
-    if (glz::write<glz::opts{.prettify = true}>(sections, buffer)) {
-        return false;
-    }
-    std::ofstream file(path, std::ios::binary | std::ios::trunc);
-    if (!file) {
-        return false;
-    }
-    file.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-    return file.good();
+    if (glz::write<glz::opts{.prettify = true}>(sections, buffer)) return false;
+    const FilePersistence::ScopedConfigLock config_lock;
+    if (!config_lock.Acquired()) return false;
+    std::string error;
+    return FilePersistence::AtomicWrite(path, buffer, error);
 }
 
 bool SettingsDoc::LoadFolder(const std::filesystem::path& folder)
 {
-    sections.clear();
-    location_on_disk = folder;
-    std::error_code ec;
-    if (!std::filesystem::is_directory(folder, ec)) {
-        return true;
+    std::vector<std::pair<std::string, std::string>> files;
+    {
+        const FilePersistence::ScopedConfigLock config_lock;
+        if (!config_lock.Acquired()) return false;
+        std::error_code ec;
+        const auto is_directory = std::filesystem::is_directory(folder, ec);
+        if (ec) return false;
+        if (is_directory) {
+            for (std::filesystem::directory_iterator it(folder, ec), end; it != end && !ec; it.increment(ec)) {
+                const auto& entry = *it;
+                if (!entry.is_regular_file(ec)) {
+                    if (ec) return false;
+                    continue;
+                }
+                if (entry.path().extension() != L".json") continue;
+                std::ifstream file(entry.path(), std::ios::binary);
+                if (!file) return false;
+                auto buffer = std::string(std::istreambuf_iterator(file), {});
+                if (file.bad()) return false;
+                const auto stem = entry.path().stem().u8string();
+                files.emplace_back(std::string(stem.begin(), stem.end()), std::move(buffer));
+            }
+            if (ec) return false;
+        }
     }
-    bool ok = true;
-    for (const auto& entry : std::filesystem::directory_iterator(folder, ec)) {
-        if (!entry.is_regular_file(ec) || entry.path().extension() != L".json") {
-            continue;
-        }
-        std::ifstream file(entry.path(), std::ios::binary);
-        if (!file) {
-            ok = false;
-            continue;
-        }
-        const std::string buffer{std::istreambuf_iterator(file), {}};
+
+    decltype(sections) staged;
+    for (auto& [stem, buffer] : files) {
         Section section;
-        if (!buffer.empty() && glz::read<lenient_opts>(section, buffer)) {
-            ok = false;
-            continue;
-        }
-        const auto stem = entry.path().stem().u8string();
-        sections.insert_or_assign(std::string(stem.begin(), stem.end()), std::move(section));
+        if (!buffer.empty() && glz::read<lenient_opts>(section, buffer)) return false;
+        staged.insert_or_assign(std::move(stem), std::move(section));
     }
-    return ok;
+    sections = std::move(staged);
+    location_on_disk = folder;
+    return true;
 }
 
 bool SettingsDoc::SaveFolder(const std::filesystem::path& folder) const
 {
-    std::error_code ec;
-    std::filesystem::create_directories(folder, ec);
-    bool ok = true;
+    std::vector<std::pair<std::filesystem::path, std::string>> files;
+    files.reserve(sections.size());
     for (const auto& [name, section] : sections) {
         std::string buffer;
-        if (glz::write<glz::opts{.prettify = true}>(section, buffer)) {
-            ok = false;
-            continue;
-        }
-        std::ofstream file(folder / SectionFilename(name), std::ios::binary | std::ios::trunc);
-        if (!file) {
-            ok = false;
-            continue;
-        }
-        file.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-        ok = file.good() && ok;
+        if (glz::write<glz::opts{.prettify = true}>(section, buffer)) return false;
+        files.emplace_back(folder / SectionFilename(name), std::move(buffer));
+    }
+
+    const FilePersistence::ScopedConfigLock config_lock;
+    if (!config_lock.Acquired()) return false;
+    std::error_code ec;
+    std::filesystem::create_directories(folder, ec);
+    if (ec) return false;
+    bool ok = true;
+    for (const auto& [path, buffer] : files) {
+        std::string error;
+        ok = FilePersistence::AtomicWrite(path, buffer, error) && ok;
     }
     return ok;
 }

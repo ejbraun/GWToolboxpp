@@ -17,8 +17,9 @@ GWToolbox++ adds a wide variety of chat commands that you trigger by typing them
 
 - `/tb`: Hide or show the main Toolbox window.
 - `/tb <name>`: Toggle the window or widget titled `<name>`.
-- `/tb save [profile]`: Save the current Toolbox settings to disk. With `[profile]`, write to that profile name; otherwise write to the default config.
-- `/tb load [profile]`: Load Toolbox settings from disk (optionally from a named profile).
+- `/tb save [profile]`: Save the current Toolbox and Guild Wars settings. Without `[profile]`, update the active profile. With `[profile]`, write to that named profile without loading it or changing the active character's profile.
+- `/tb load [profile]`: Load a profile and bind the active character to it. Without `[profile]`, load `default`.
+- `/tb global save` or `/tb global load`: Save or reload the module enablement, enabled plugin list, and hotkey definitions shared by every profile.
 - `/tb reset`: Move the Settings and main Toolbox windows back to the top-left of the screen.
 - `/tb close`, `/tb quit`, or `/tb exit`: Close Toolbox entirely.
 - `/show [name]`: Show a window or widget by name.

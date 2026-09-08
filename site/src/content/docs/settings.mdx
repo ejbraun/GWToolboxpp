@@ -163,7 +163,19 @@ These options change some of the ways Toolbox function:
   
 * **Save Location Data** saves your co-ordinates every second to a file in the settings folder.
 
-* Each window and widget (except the main window and Settings) can be completely turned off. When you restart Toolbox, your choice of disabled features will not load, and their buttons on the main window will no longer appear.
+### Config Profiles
+
+Config profiles keep Toolbox settings, layouts, module sidecar files, and a full Guild Wars settings snapshot together. The Guild Wars snapshot includes preferences, graphics and audio choices, key mappings, window positions, and client-window geometry. Optional-module enablement, enabled plugins, and hotkey definitions are computer-global instead, so switching profiles never unloads modules or rebuilds hotkeys.
+
+- **Save As Profile** copies the active profile, writes the current Toolbox and Guild Wars state, selects the new profile, and binds the current character to it.
+- **Save Current Profile** updates the active profile.
+- **Load Selected Profile** loads the selected profile and binds the current character to it without saving the outgoing profile.
+- Profiles switch automatically when a character uses a different profile. Returning to character select still saves the outgoing active profile; characters without an assignment use `default`.
+- Switching between characters that share a profile keeps the current Toolbox and Guild Wars settings without reloading them. **Load Selected Profile** or `/tb load <profile>` explicitly reloads it, including changes saved by another client.
+
+The equivalent chat commands are <ToolboxPath kind="command" steps={["/tb save [profile]"]} /> and <ToolboxPath kind="command" steps={["/tb load [profile]"]} />. `/tb save` updates the active profile, while `/tb save <profile>` writes the current settings to the named profile without loading it. Use `/tb global save` or `/tb global load` to explicitly save or reload the shared module, plugin, and hotkey state.
+
+* Each window and widget (except the main window and Settings) can be completely turned off. This choice is shared by all profiles, applies immediately, and is saved when changed.
 
 * Each window and widget (except the main window itself) can be set to appear as a button in the main window or not. No restart is required.
 
@@ -177,23 +189,21 @@ Here you can adjust the settings of the [`cam unlock` feature](/docs/camera/).
 Here you can adjust the appearance of Toolbox.
 
 ## Storage
-The settings are stored in the folder `C:\Users\[Username]\AppData\Local\GWToolboxpp`. You can open this folder by clicking on the button at the top of the Settings window, manually navigate to it, or type %LOCALAPPDATA% in Start Menu, Run, or in the address in Explorer.
+Settings are stored under `Documents\GWToolboxpp\[ComputerName]`. You can open this location with the settings-folder button at the top of the Settings window.
 
-There are a number of files in this folder:
+Profile data lives below `configs`:
 
-* `img/` folder contains icons used in Toolbox.
-* `FilterByContent.txt` contains the words used in the content-based [chat filter](filter).
-* `Font.ttf` is the font used by Toolbox.
-* `GWToolbox.dll` is Toolbox itself.
-* `GWToolbox.ini` contains most of the Toolbox settings.
-* `Hotkeys.ini` contains your Hotkeys window entries.
-* `healthlog.ini` contains the health of mobs by id, which is collected and used by the damage monitor for more accuracy in measuring the damage of your allies.
-* `interface.ini` contains information about the interface, such as position and size of your windows.
-* `Markers.ini` contains your custom minimap markers.
-* `Theme.ini` contains any changes you make to the default theme.
+* `configs\default` is the fallback profile.
+* `configs\[ProfileName]` contains each named profile.
+* `configs\character_profiles.json` stores character-to-profile assignments.
+* A profile's `modules` folder contains per-module JSON settings. Sidecar data such as `interface.ini`, `Layout.json`, `Markers.json`, and builds stays beside it.
+* `GuildWarsSettings.json` is the profile's Guild Wars preferences, key mappings, UI positions, and window geometry snapshot. Existing `guildwars_settings.ini` snapshots remain loadable.
+* `global\modules.json`, `global\plugins.json`, and `global\hotkeys.json` contain state shared by every profile. Changes to module enablement, the enabled plugin list, and hotkey definitions are saved immediately and are excluded from profile saves.
+
+Older default installations that stored settings directly in the computer folder are read as a migration fallback.
 
 ## Backup
-You can (and should!) backup your Toolbox settings by saving some of the files above, and copy them over to the new installation. You definitely want to backup `GWToolbox.ini`, `Hotkeys.ini`, `Markers.ini` and `Theme.ini`. Optionally you can also backup all the `.ini` and `.txt` files.
+You can (and should) back up both the `configs` and `global` folders so profiles, character assignments, shared hotkeys, module settings, layouts, and Guild Wars snapshots stay together.
 
 In general, it is recommended to backup your Toolbox settings, so you have a copy in case something goes wrong.
 

@@ -13,6 +13,7 @@
 #include <d3d9on12.h>
 #include <Defines.h>
 #include <Modules/Resources.h>
+#include <Utils/FilePersistence.h>
 #include <Utils/GuiUtils.h>
 #include "GuildWarsSettingsModule.h"
 
@@ -241,6 +242,19 @@ namespace {
         RECT gw_window_pos = { 0 };
     };
 
+    bool EnsureKeyMappingsArray()
+    {
+        if (key_mappings_array) return true;
+        // Profiles use this backend even when the optional settings UI is disabled.
+        // NB: This address is found twice, we only care about the first.
+        const auto address = GW::Scanner::FindAssertion("FrKey.cpp", "count == arrsize(s_remapTable)", 0, 0x13);
+        if (address && GW::Scanner::IsValidPtr(*reinterpret_cast<uintptr_t*>(address))) {
+            key_mappings_array = *reinterpret_cast<uint32_t**>(address);
+        }
+        return key_mappings_array != nullptr;
+    }
+
+    // Read preferences from in-game memory to a PreferencesStruct
     void GetPreferences(PreferencesStruct& out)
     {
         out.preference_values.resize(std::to_underlying(GW::UI::NumberPreference::Count), 0);
@@ -257,13 +271,14 @@ namespace {
         }
         out.window_positions.resize(GW::UI::WindowID::WindowID_Count, {0});
         for (auto i = 0u; i < std::to_underlying(GW::UI::WindowID::WindowID_Count); i++) {
-            out.window_positions[i] = *GetWindowPosition(static_cast<GW::UI::WindowID>(i));
+            if (const auto position = GetWindowPosition(static_cast<GW::UI::WindowID>(i))) {
+                out.window_positions[i] = *position;
+            }
         }
-        out.key_mappings.resize(key_mappings_array_length, 0);
-        for (auto i = 0u; key_mappings_array && i < key_mappings_array_length; i++) {
-            out.key_mappings[i] = key_mappings_array[i];
+        if (EnsureKeyMappingsArray()) {
+            out.key_mappings.assign(key_mappings_array, key_mappings_array + key_mappings_array_length);
         }
-        ASSERT(GetWindowRect(GW::MemoryMgr::GetGWWindowHandle(), &out.gw_window_pos));
+        GetWindowRect(GW::MemoryMgr::GetGWWindowHandle(), &out.gw_window_pos);
     }
 
     // Run this on the game thread.
@@ -281,8 +296,10 @@ namespace {
         for (auto i = 0u; i < in.window_positions.size() && i < std::to_underlying(GW::UI::WindowID::WindowID_Count); i++) {
             SetWindowPosition(static_cast<GW::UI::WindowID>(i), &in.window_positions[i]);
         }
-        for (auto i = 0u; i < in.key_mappings.size() && i < key_mappings_array_length; i++) {
-            key_mappings_array[i] = in.key_mappings[i];
+        if (EnsureKeyMappingsArray()) {
+            for (auto i = 0u; i < in.key_mappings.size() && i < key_mappings_array_length; i++) {
+                key_mappings_array[i] = in.key_mappings[i];
+            }
         }
 
         if (GW::UI::GetPreference(GW::UI::NumberPreference::ScreenBorderless) == 0) {
@@ -396,35 +413,10 @@ namespace {
             return;
         }
         GW::GameThread::Enqueue([filename_cpy = std::filesystem::path(result)] {
-            PreferencesStruct prefs;
-            if (!exists(filename_cpy)) {
-                Log::Error("File name %s doesn't exist", filename_cpy.string().c_str());
-                return;
+            std::string status;
+            if (!GuildWarsSettingsModule::LoadSettingsFromFile(filename_cpy, status)) {
+                Log::Error("%s", status.c_str());
             }
-
-            if (filename_cpy.extension() == L".ini") {
-                // Legacy preset format; still readable, but presets are only ever written as .json now
-                ToolboxIni ini;
-                const auto err = ini.LoadFile(filename_cpy.string().c_str());
-                if (err != SI_OK) {
-                    Log::Error("Failed to load ini file %s - error code %d", filename_cpy.string().c_str(), err);
-                    return;
-                }
-                LoadPreferences(prefs, ini);
-            }
-            else {
-                std::ifstream file(filename_cpy, std::ios::binary);
-                const std::string buffer{std::istreambuf_iterator(file), {}};
-                guild_wars_settings_json::PreferencesJson json;
-                if (!file || glz::read<glz::opts{.error_on_unknown_keys = false}>(json, buffer)) {
-                    Log::Error("Failed to load json file %s", filename_cpy.string().c_str());
-                    return;
-                }
-                LoadPreferences(prefs, json);
-            }
-            SetPreferences(prefs);
-
-            Log::Info("Preferences loaded from %s", filename_cpy.filename().string().c_str());
         });
     }
 
@@ -458,22 +450,9 @@ namespace {
             filename.replace_extension(L".json");
         }
         GW::GameThread::Enqueue([filename_cpy = std::move(filename)] {
-            PreferencesStruct current_prefs;
-            GetPreferences(current_prefs);
-            guild_wars_settings_json::PreferencesJson json;
-            SavePreferences(current_prefs, json);
-            std::string buffer;
-            if (glz::write<glz::opts{.prettify = true}>(json, buffer)) {
-                Log::Error("Failed to serialise preferences for %s", filename_cpy.string().c_str());
-                return;
-            }
-            std::ofstream file(filename_cpy, std::ios::binary | std::ios::trunc);
-            file.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-            if (file.good()) {
-                Log::Info("Preferences saved to %s", filename_cpy.filename().string().c_str());
-            }
-            else {
-                Log::Error("Failed to save json file %s", filename_cpy.string().c_str());
+            std::string status;
+            if (!GuildWarsSettingsModule::SaveCurrentSettingsToFile(filename_cpy, status)) {
+                Log::Error("%s", status.c_str());
             }
         });
     }
@@ -646,11 +625,7 @@ namespace {
 void GuildWarsSettingsModule::Initialize()
 {
     ToolboxModule::Initialize();
-    // NB: This address is fond twice, we only care about the first.
-    uintptr_t address = GW::Scanner::FindAssertion("FrKey.cpp", "count == arrsize(s_remapTable)", 0, 0x13);
-    if (address && GW::Scanner::IsValidPtr(*(uintptr_t*)address)) {
-        key_mappings_array = *(uint32_t**)address;
-    }
+    EnsureKeyMappingsArray();
 #ifdef _DEBUG
     ASSERT(key_mappings_array);
 #endif
@@ -658,6 +633,87 @@ void GuildWarsSettingsModule::Initialize()
     GW::Chat::CreateCommand(&ChatCmd_HookEntry, L"saveprefs", CmdSave);
 
     GW::Chat::CreateCommand(&ChatCmd_HookEntry, L"loadprefs", CmdLoad);
+}
+
+bool GuildWarsSettingsModule::SaveCurrentSettingsToFile(const std::filesystem::path& path, std::string& status)
+{
+    std::string buffer;
+    if (!CaptureCurrentSettings(buffer, status)) return false;
+    return SaveCapturedSettingsToFile(path, buffer, status);
+}
+
+bool GuildWarsSettingsModule::CaptureCurrentSettings(std::string& serialized, std::string& status)
+{
+    PreferencesStruct current_prefs;
+    GetPreferences(current_prefs);
+    guild_wars_settings_json::PreferencesJson json;
+    SavePreferences(current_prefs, json);
+    if (glz::write<glz::opts{.prettify = true}>(json, serialized)) {
+        status = "Failed to serialise the current Guild Wars settings";
+        return false;
+    }
+    status.clear();
+    return true;
+}
+
+bool GuildWarsSettingsModule::SaveCapturedSettingsToFile(
+    const std::filesystem::path& path,
+    const std::string_view serialized,
+    std::string& status)
+{
+    const FilePersistence::ScopedConfigLock config_lock;
+    if (!config_lock.Acquired()) {
+        status = config_lock.Error();
+        return false;
+    }
+    std::string error;
+    if (!FilePersistence::AtomicWrite(path, serialized, error)) {
+        status = std::format("Failed to save Guild Wars settings to '{}': {}", path.string(), error);
+        return false;
+    }
+    status = std::format("Guild Wars settings saved to '{}'", path.filename().string());
+    Log::Info("%s", status.c_str());
+    return true;
+}
+
+bool GuildWarsSettingsModule::LoadSettingsFromFile(const std::filesystem::path& path, std::string& status)
+{
+    PreferencesStruct prefs;
+    {
+        const FilePersistence::ScopedConfigLock config_lock;
+        if (!config_lock.Acquired()) {
+            status = config_lock.Error();
+            return false;
+        }
+        if (!std::filesystem::exists(path)) {
+            status = std::format("Guild Wars settings file '{}' does not exist", path.string());
+            return false;
+        }
+        if (path.extension() == L".ini") {
+            // Legacy preset format; still readable, but presets are only ever written as .json now
+            ToolboxIni ini;
+            const auto err = ini.LoadFile(path.string().c_str());
+            if (err != SI_OK) {
+                status = std::format("Failed to load Guild Wars settings ini '{}' (error {})", path.string(), static_cast<int>(err));
+                return false;
+            }
+            LoadPreferences(prefs, ini);
+        }
+        else {
+            std::ifstream file(path, std::ios::binary);
+            const std::string buffer{std::istreambuf_iterator(file), {}};
+            guild_wars_settings_json::PreferencesJson json;
+            if (!file || glz::read<glz::opts{.error_on_unknown_keys = false}>(json, buffer)) {
+                status = std::format("Failed to load Guild Wars settings json '{}'", path.string());
+                return false;
+            }
+            LoadPreferences(prefs, json);
+        }
+    }
+    SetPreferences(prefs);
+    status = std::format("Guild Wars settings loaded from '{}'", path.filename().string());
+    Log::Info("%s", status.c_str());
+    return true;
 }
 
 void GuildWarsSettingsModule::Terminate()

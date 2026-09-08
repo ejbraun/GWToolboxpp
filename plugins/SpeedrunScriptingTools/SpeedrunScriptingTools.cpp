@@ -686,7 +686,7 @@ void SpeedrunScriptingTools::clear()
     for (auto& script : m_currentScripts)
     {
         for (auto& action : script.actions)
-            action->finalAction();
+            if (action && action->hasBeenStarted()) action->finalAction();
     }
     m_currentScripts.clear();
 
@@ -921,6 +921,7 @@ void SpeedrunScriptingTools::DrawSettings()
 
 void SpeedrunScriptingTools::loadFromIniFile(const ToolboxIni& ini)
 {
+    clear();
     m_scripts.clear();
     m_groups.clear();
 
@@ -1041,14 +1042,19 @@ void SpeedrunScriptingTools::Update(float delta)
         return;
     }
 
-    if (GW::Map::GetInstanceType() == GW::Constants::InstanceType::Loading && !isInLoadingScreen) {
-        // First frame on new loading screen
-        isInLoadingScreen = true;
-        clear();
+    if (GW::Map::GetInstanceType() == GW::Constants::InstanceType::Loading) {
+        if (!isInLoadingScreen) {
+            // First frame on new loading screen
+            isInLoadingScreen = true;
+            clear();
+        }
+        framesSinceLoadingFinished = 0;
+        return;
     }
+    isInLoadingScreen = false;
 
     const auto map = GW::Map::GetMapInfo();
-    if (isInLoadingScreen || !map || map->GetIsPvP() || !GW::Agents::GetControlledCharacter() || (GW::Map::GetInstanceType() == GW::Constants::InstanceType::Outpost && !runInOutposts)) {
+    if (!map || map->GetIsPvP() || !GW::Agents::GetControlledCharacter() || (GW::Map::GetInstanceType() == GW::Constants::InstanceType::Outpost && !runInOutposts)) {
         return;
     }
     if (framesSinceLoadingFinished < 1) 
@@ -1066,6 +1072,10 @@ void SpeedrunScriptingTools::Update(float delta)
         {
             // Execute current script
             auto& currentActions = currentScript.actions;
+            if (!currentActions.front()) {
+                currentActions.erase(currentActions.begin());
+                continue;
+            }
             auto& currentAction = **currentActions.begin();
             if (currentAction.behaviour().test(ActionBehaviourFlag::ImmediateFinish)) {
                 currentAction.initialAction();
@@ -1091,6 +1101,7 @@ void SpeedrunScriptingTools::Update(float delta)
                         currentActions.erase(currentActions.begin(), currentActions.begin() + 1);
                         break;
                     default:
+                        logMessage(std::format("Stopped script {}: action {} failed.", currentScript.name, toString(currentAction.type())));
                         currentAction.finalAction();
                         currentActions.clear();
                 }
@@ -1288,8 +1299,10 @@ void SpeedrunScriptingTools::Initialize(ImGuiContext* ctx, const ImGuiAllocFns a
 
     GW::StoC::RegisterPostPacketCallback<GW::Packet::StoC::InstanceLoadFile>(&InstanceLoadFile_Entry, [this](GW::HookStatus*, const GW::Packet::StoC::InstanceLoadFile*)
     {
+        clear();
         ScriptVariableManager::getInstance().clear();
-        isInLoadingScreen = false;
+        // This packet can precede the end of the loading screen; Update observes when play resumes.
+        isInLoadingScreen = true;
         framesSinceLoadingFinished = 0;
 
         triggerScripts(Trigger::InstanceLoad, [](auto) { return true; }, false);
@@ -1445,7 +1458,7 @@ void SpeedrunScriptingTools::OnDisplayDialogDecoded(void* context, const wchar_t
 void SpeedrunScriptingTools::CompleteDisplayDialogDecode(const wchar_t* decoded)
 {
     if (!terminating && decoded) {
-        const auto message = WStringToString(decoded);
+        const auto message = WStringToString(PluginUtils::StripTags(decoded));
         triggerScripts(Trigger::DisplayDialog, [&](const Script& script) {
             return !script.triggerData.message.empty() && message.contains(script.triggerData.message);
         });

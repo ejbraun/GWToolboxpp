@@ -184,31 +184,117 @@ namespace {
     }
 
     // Instances GWToolboxdll's ObjectiveTimerWindow tracks AND the backend accepts (map_configs).
-    // Re-expand from ObjectiveTimerWindow::AddObjectiveSet()'s switch (more elite areas, dungeons,
-    // ToPK) as the backend gains map_configs rows for them. Domain of Anguish is tracked via a
-    // separate ObjectiveTimerWindow path (AddDoAObjectiveSet, gated on InstanceLoadFile's
-    // map_fileID, not the map_id switch) because its map_id is shared with the solo Ebony Citadel
-    // of Mallyx challenge - the IsAcceptablePartySize 8-man gate rejects that 1-player instance.
+    // Re-expand from ObjectiveTimerWindow::AddObjectiveSet()'s switch as the backend gains
+    // map_configs rows. Domain of Anguish is tracked via a separate ObjectiveTimerWindow path
+    // (AddDoAObjectiveSet, gated on InstanceLoadFile's map_fileID, not the map_id switch) because
+    // its map_id is shared with the solo Ebony Citadel of Mallyx challenge - the
+    // IsAcceptablePartySize 8-man gate rejects that 1-player instance.
+    //
+    // Dungeons: every entry is the value that STARTS a run - the entry (Level 1) map id for a
+    // multi-level dungeon (see kDungeonLevelToEntry / the multi-instance handling in
+    // OnInstanceLoadInfo + OnGameSrvTransfer), or the single map id for a 1-level dungeon. Deeper
+    // dungeon levels are deliberately NOT here: they continue the run in progress rather than
+    // starting a new one. Slavers' Exile is entered at Level 1 but GWToolboxdll only builds an
+    // ObjectiveSet for its final level (Slavers_Exile_Level_5), so that's the tracked id and the
+    // run is single-instance. See specs/features/dungeons.md (gwsctracker repo).
     const std::unordered_set<uint32_t> kTrackedMapIds = {
         static_cast<uint32_t>(GW::Constants::MapID::The_Underworld),
         static_cast<uint32_t>(GW::Constants::MapID::The_Fissure_of_Woe),
         static_cast<uint32_t>(GW::Constants::MapID::Domain_of_Anguish),
+        // multi-level dungeons - entry (Level 1) map ids
+        static_cast<uint32_t>(GW::Constants::MapID::Cathedral_of_Flames_Level_1),
+        static_cast<uint32_t>(GW::Constants::MapID::Catacombs_of_Kathandrax_Level_1),
+        static_cast<uint32_t>(GW::Constants::MapID::Rragars_Menagerie_Level_1),
+        static_cast<uint32_t>(GW::Constants::MapID::Oolas_Lab_Level_1),
+        static_cast<uint32_t>(GW::Constants::MapID::Shards_of_Orr_Level_1),
+        static_cast<uint32_t>(GW::Constants::MapID::Arachnis_Haunt_Level_1),
+        static_cast<uint32_t>(GW::Constants::MapID::Vloxen_Excavations_Level_1),
+        static_cast<uint32_t>(GW::Constants::MapID::Heart_of_the_Shiverpeaks_Level_1),
+        static_cast<uint32_t>(GW::Constants::MapID::Bloodstone_Caves_Level_1),
+        static_cast<uint32_t>(GW::Constants::MapID::Bogroot_Growths_Level_1),
+        static_cast<uint32_t>(GW::Constants::MapID::Ravens_Point_Level_1),
+        static_cast<uint32_t>(GW::Constants::MapID::Sepulchre_of_Dragrimmar_Level_1),
+        static_cast<uint32_t>(GW::Constants::MapID::Frostmaws_Burrows_Level_1),
+        static_cast<uint32_t>(GW::Constants::MapID::Darkrime_Delves_Level_1),
+        // single-instance dungeons (tracked exactly like Domain of Anguish)
+        static_cast<uint32_t>(GW::Constants::MapID::Ooze_Pit),
+        static_cast<uint32_t>(GW::Constants::MapID::Slavers_Exile_Level_5),
+        static_cast<uint32_t>(GW::Constants::MapID::Secret_Lair_of_the_Snowmen),
+        static_cast<uint32_t>(GW::Constants::MapID::Fronis_Irontoes_Lair_mission),
     };
 
+    // Every explorable level of a multi-level dungeon -> that dungeon's entry (Level 1) map id, which
+    // is the run key: the plugin stamps utc_start once on the entry level and publishes under this
+    // id, matching how GWToolboxdll's ObjectiveTimerWindow builds one ObjectiveSet per dungeon keyed
+    // to Resources::GetMapName(levels[0]). Level lists mirror ObjectiveTimerWindow.cpp's
+    // AddDungeonObjectiveSet() calls exactly. 1-level dungeons and Slavers' Exile are not here - they
+    // are single-instance and handled like any other tracked area.
+    const std::unordered_map<uint32_t, uint32_t> kDungeonLevelToEntry = [] {
+        using GW::Constants::MapID;
+        std::unordered_map<uint32_t, uint32_t> m;
+        const auto add = [&](const std::initializer_list<MapID> levels) {
+            const auto entry = static_cast<uint32_t>(*levels.begin());
+            for (const auto lvl : levels) {
+                m.emplace(static_cast<uint32_t>(lvl), entry);
+            }
+        };
+        add({MapID::Cathedral_of_Flames_Level_1, MapID::Cathedral_of_Flames_Level_2, MapID::Cathedral_of_Flames_Level_3});
+        add({MapID::Catacombs_of_Kathandrax_Level_1, MapID::Catacombs_of_Kathandrax_Level_2, MapID::Catacombs_of_Kathandrax_Level_3});
+        add({MapID::Rragars_Menagerie_Level_1, MapID::Rragars_Menagerie_Level_2, MapID::Rragars_Menagerie_Level_3});
+        add({MapID::Oolas_Lab_Level_1, MapID::Oolas_Lab_Level_2, MapID::Oolas_Lab_Level_3});
+        add({MapID::Shards_of_Orr_Level_1, MapID::Shards_of_Orr_Level_2, MapID::Shards_of_Orr_Level_3});
+        add({MapID::Arachnis_Haunt_Level_1, MapID::Arachnis_Haunt_Level_2});
+        add({MapID::Vloxen_Excavations_Level_1, MapID::Vloxen_Excavations_Level_2, MapID::Vloxen_Excavations_Level_3});
+        add({MapID::Heart_of_the_Shiverpeaks_Level_1, MapID::Heart_of_the_Shiverpeaks_Level_2, MapID::Heart_of_the_Shiverpeaks_Level_3});
+        add({MapID::Bloodstone_Caves_Level_1, MapID::Bloodstone_Caves_Level_2, MapID::Bloodstone_Caves_Level_3});
+        add({MapID::Bogroot_Growths_Level_1, MapID::Bogroot_Growths_Level_2});
+        add({MapID::Ravens_Point_Level_1, MapID::Ravens_Point_Level_2, MapID::Ravens_Point_Level_3});
+        add({MapID::Sepulchre_of_Dragrimmar_Level_1, MapID::Sepulchre_of_Dragrimmar_Level_2});
+        add({MapID::Frostmaws_Burrows_Level_1, MapID::Frostmaws_Burrows_Level_2, MapID::Frostmaws_Burrows_Level_3,
+             MapID::Frostmaws_Burrows_Level_4, MapID::Frostmaws_Burrows_Level_5});
+        add({MapID::Darkrime_Delves_Level_1, MapID::Darkrime_Delves_Level_2, MapID::Darkrime_Delves_Level_3});
+        return m;
+    }();
+
+    // Any explorable level of a multi-level dungeon (entry or deeper).
+    bool IsDungeonLevelMap(const uint32_t map_id) { return kDungeonLevelToEntry.contains(map_id); }
+    // The run key for a multi-level dungeon level, or 0 if map_id isn't one.
+    uint32_t DungeonEntryFor(const uint32_t map_id)
+    {
+        const auto it = kDungeonLevelToEntry.find(map_id);
+        return it == kDungeonLevelToEntry.end() ? 0 : it->second;
+    }
+
+    // How long to wait after a GameSrvTransfer inside a dungeon for the next instance to load before
+    // giving up and finalizing the run anyway. The inter-level load screen is well under this; the
+    // timeout only fires when no InstanceLoadInfo ever follows (client crash / disconnect on the
+    // load screen). See SCTracker::ProcessDungeonRunLifecycle.
+    constexpr uint64_t kDungeonExitGraceMs = 30 * 1000;
+
+    // A run published as a dungeon: any tracked map that isn't UW / FoW / DoA. The arg is always a
+    // *published* map id (a multi-level dungeon's entry id, or a single-instance dungeon's id) - a
+    // deeper level never reaches these gates.
+    bool IsDungeonRun(const uint32_t map_id)
+    {
+        using GW::Constants::MapID;
+        const auto id = static_cast<MapID>(map_id);
+        return kTrackedMapIds.contains(map_id)
+            && id != MapID::The_Underworld && id != MapID::The_Fissure_of_Woe && id != MapID::Domain_of_Anguish;
+    }
+
     // Whether the backend has a map_configs row for this (tracked map, real-player count): the
-    // Underworld and Domain of Anguish are 8-man; the Fissure of Woe has a config for every party
-    // size 1-8. A run whose CountRealPlayers matches no config is never published and never opens a
-    // vote (ProcessSync).
+    // Underworld is 8-man; the Fissure of Woe and every dungeon have a config for every party size
+    // 1-8 (all-human parties). Domain of Anguish is 8-man. A run whose CountRealPlayers matches no
+    // config is never published and never opens a vote (ProcessSync).
     bool IsAcceptablePartySize(const uint32_t map_id, const uint32_t real_player_count)
     {
-        switch (static_cast<GW::Constants::MapID>(map_id)) {
-            case GW::Constants::MapID::The_Fissure_of_Woe:
-                return real_player_count >= 1 && real_player_count <= 8;
-            // Domain_of_Anguish is 8-man only - the == 8 check below also rejects the solo Ebony
-            // Citadel of Mallyx challenge, which runs on the same map_id with 1 real player.
-            default: // The_Underworld, Domain_of_Anguish, and any future 8-man-only tracked area
-                return real_player_count == 8;
+        if (static_cast<GW::Constants::MapID>(map_id) == GW::Constants::MapID::The_Fissure_of_Woe
+            || IsDungeonRun(map_id)) {
+            return real_player_count >= 1 && real_player_count <= 8;
         }
+        // The_Underworld, Domain_of_Anguish (== 8 also rejects the solo Ebony Citadel of Mallyx
+        // challenge, same map_id / 1 real player), and any future 8-man-only tracked area.
+        return real_player_count == 8;
     }
 
     // Whether a (map, real-player count) run has a role model at all. The Underworld trapper team
@@ -587,6 +673,9 @@ void SCTracker::Initialize(ImGuiContext* ctx, const ImGuiAllocFns allocator_fns,
         &ObjectiveDone_HookEntry, [this](GW::HookStatus*, const GW::Packet::StoC::ObjectiveDone* packet) {
             OnObjectiveDone(packet->objective_id);
         });
+    GW::StoC::RegisterPacketCallback<GW::Packet::StoC::DungeonReward>(
+        &DungeonReward_HookEntry,
+        [this](GW::HookStatus*, GW::Packet::StoC::DungeonReward*) { OnDungeonReward(); });
     // Skill used on self / no target.
     GW::StoC::RegisterPacketCallback<GW::Packet::StoC::GenericValue>(
         &GenericValueSelf_HookEntry,
@@ -645,6 +734,7 @@ void SCTracker::Terminate()
     GW::StoC::RemoveCallback<GW::Packet::StoC::ItemGeneral>(&ItemGeneral_HookEntry);
     GW::StoC::RemoveCallback<GW::Packet::StoC::GenericValueTarget>(&GenericValueTarget_HookEntry);
     GW::StoC::RemoveCallback<GW::Packet::StoC::GenericValue>(&GenericValueSelf_HookEntry);
+    GW::StoC::RemoveCallback<GW::Packet::StoC::DungeonReward>(&DungeonReward_HookEntry);
     GW::StoC::RemoveCallback<GW::Packet::StoC::ObjectiveDone>(&ObjectiveDone_HookEntry);
     GW::StoC::RemoveCallback<GW::Packet::StoC::AgentUpdateAllegiance>(&AgentUpdateAllegiance_HookEntry);
     GW::StoC::RemoveCallback<GW::Packet::StoC::AgentState>(&AgentState_HookEntry);
@@ -656,11 +746,32 @@ void SCTracker::Terminate()
 
 void SCTracker::OnInstanceLoadInfo(const uint32_t map_id, const bool is_explorable)
 {
-    if (!is_explorable || !kTrackedMapIds.contains(map_id)) {
+    // A dungeon run whose GameSrvTransfer was deferred (see OnGameSrvTransfer): decide whether this
+    // load is the next level of the same dungeon (keep the run going) or the way out (finalize it).
+    if (dungeon_transfer_pending) {
+        dungeon_transfer_pending = false;
+        if (is_explorable && DungeonEntryFor(map_id) == pending_dungeon_entry && pending_dungeon_entry != 0) {
+            // Level transition: same run continues. No re-capture, no re-stamp of utc_start.
+            current_level_started_at = static_cast<uint32_t>(time(nullptr));
+            RebindPartyAgentsForNewLevel(); // agent ids are fresh in the new instance
+            return;
+        }
+        // Outpost, town, a different tracked area, or an untracked explorable - the dungeon is over.
+        FinalizeRun();
+        // fall through: this load might itself start a fresh tracked run (e.g. straight into UW).
+    }
+
+    // IsDungeonLevelMap also accepts a *deeper* level: a player who joins a party already inside a
+    // dungeon loads straight into Level 2+ with no active run. That run has no early-level timing
+    // (same "joined mid-run" degradation UW/FoW already tolerate - ProcessSync's IsRunCompleted
+    // fallback still classifies it), but it's published under the right entry id and is better than
+    // silently losing it.
+    if (!is_explorable || !(kTrackedMapIds.contains(map_id) || IsDungeonLevelMap(map_id))) {
         return; // not an area ObjectiveTimerWindow tracks; skip capture entirely for this instance
     }
+    const uint32_t dungeon_entry = DungeonEntryFor(map_id); // 0 unless map_id is a multi-level dungeon level
     next_utc_start = static_cast<uint32_t>(time(nullptr));
-    next_map_id = map_id;
+    next_map_id = dungeon_entry != 0 ? dungeon_entry : map_id;
     next_character_name.clear();
     if (const GW::CharContext* cc = GW::GetCharContext()) {
         next_character_name = PluginUtils::WStringToString(cc->player_name);
@@ -679,6 +790,14 @@ void SCTracker::OnInstanceLoadInfo(const uint32_t map_id, const bool is_explorab
     // queued from the previous run. Decoding is near-instant in practice, but without this a very
     // late-finishing decode could otherwise attribute a previous run's skill use to this new one.
     pending_role_skill_events.clear();
+
+    // Dungeon multi-instance state. pending_dungeon_entry is non-zero only for a multi-level dungeon;
+    // a 1-level dungeon (Ooze Pit, Snowmen, Fronis) and Slavers' Exile are tracked single-instance,
+    // exactly like Domain of Anguish.
+    pending_dungeon_entry = dungeon_entry;
+    dungeon_transfer_pending = false;
+    dungeon_completed = false;
+    current_level_started_at = next_utc_start;
 }
 
 void SCTracker::OnPartyDefeated()
@@ -813,13 +932,16 @@ void SCTracker::OnWriteToChatLog(const wchar_t* message)
 // minute of the instance (loading in, initial positioning, an early accidental pull) aren't counted -
 // party_member_currently_dead is deliberately left unsynced during that window, same as dhuum_started:
 // the first real edge evaluated after the grace period compares against whatever it defaulted to,
-// which self-corrects rather than needing to be back-filled.
+// which self-corrects rather than needing to be back-filled. The grace anchor is current_level_started_at,
+// which equals pending_utc_start for a single-instance run but is bumped on each dungeon level load
+// (RebindPartyAgentsForNewLevel resets party_member_currently_dead there too) so the same spawn-in
+// churn is ignored on every level, not just the first.
 void SCTracker::OnUpdateAgentState(const uint32_t agent_id, const uint32_t state)
 {
     if (!run_active || dhuum_started) {
         return;
     }
-    if (static_cast<uint32_t>(time(nullptr)) - pending_utc_start < kDeathTrackingGraceSec) {
+    if (static_cast<uint32_t>(time(nullptr)) - current_level_started_at < kDeathTrackingGraceSec) {
         return;
     }
     const auto it = agent_id_to_party_index.find(agent_id);
@@ -880,6 +1002,18 @@ void SCTracker::OnObjectiveDone(const uint32_t objective_id)
         if (fow_objectives_seen_done.size() == kFowQuestObjectiveIds.size()) {
             fow_completed = true;
         }
+    }
+}
+
+// GAME_SMSG_DUNGEON_REWARD - the reward screen at the end of a dungeon. Same signal
+// ObjectiveTimerWindow's AddDungeonObjectiveSet() ends its final "Level N" objective on. Latched
+// for the rest of the run so FinalizeRun classifies "completed" even when the party walks out
+// rather than resigning (ProcessSync's IsRunCompleted fallback still covers a mid-run joiner who
+// never saw this packet). Applies to every dungeon - 1-level, multi-level, and Slavers' Exile.
+void SCTracker::OnDungeonReward()
+{
+    if (run_active) {
+        dungeon_completed = true;
     }
 }
 
@@ -1061,7 +1195,42 @@ void SCTracker::OnGameSrvTransfer()
     if (!run_active) {
         return;
     }
+
+    // Inside a multi-level dungeon, a GameSrvTransfer is (usually) just the portal to the next
+    // level, not the end of the run. Defer the decision to OnInstanceLoadInfo, which sees which map
+    // actually loads; ProcessDungeonRunLifecycle is a backstop if none ever does. The run stays
+    // active and its cross-level wipe/resign/completion state keeps accumulating.
+    if (pending_dungeon_entry != 0) {
+        dungeon_transfer_pending = true;
+        dungeon_transfer_tick = GetTickCount64();
+        return;
+    }
+
+    FinalizeRun();
+}
+
+void SCTracker::ProcessDungeonRunLifecycle()
+{
+    if (!dungeon_transfer_pending) {
+        return;
+    }
+    // A real inter-level load screen resolves well inside kDungeonExitGraceMs via OnInstanceLoadInfo.
+    // Past that with no InstanceLoadInfo at all, the client crashed/disconnected on the load screen -
+    // finalize now so the run's log/vote aren't stuck for the rest of the session.
+    if (GetTickCount64() - dungeon_transfer_tick > kDungeonExitGraceMs) {
+        dungeon_transfer_pending = false;
+        FinalizeRun();
+    }
+}
+
+// Run-end classification + log write + vote open. Called immediately from OnGameSrvTransfer for a
+// single-instance run, or deferred (via dungeon_transfer_pending) once a multi-level dungeon run is
+// confirmed over - see OnInstanceLoadInfo / ProcessDungeonRunLifecycle.
+void SCTracker::FinalizeRun()
+{
     run_active = false;
+    pending_dungeon_entry = 0;
+    dungeon_transfer_pending = false;
 
     if (restart_requested || active_capture || party_members.empty()) {
         return; // party capture never completed for this run; nothing worth logging
@@ -1091,18 +1260,19 @@ void SCTracker::OnGameSrvTransfer()
     if (end_reason == "unknown" && wipe_detected) {
         end_reason = "wipe";
     }
-    // dhuum_completed (Underworld) / fow_completed (Fissure of Woe) are latched in real time off the
-    // native GAME_SMSG_MISSION_OBJECTIVE_COMPLETE packet(s) (see OnObjectiveDone) - the same signals
-    // GWToolboxdll uses to mark its own objectives Completed, just observed here locally and
-    // immediately instead of from its ObjectiveTimerRuns_*.json file, which isn't flushed to disk
-    // until the next map load. This matters most for FoW: it has no exit portal, so a successful run
-    // is normally left by everyone resigning - without this latch that reads as "resign" and
-    // OnGameSrvTransfer below opens a *failure* vote for a run that actually cleared, only corrected
-    // a map-load later once ProcessSync can read the objective file. With it, "completed" is already
-    // known right now. ProcessSync's later IsRunCompleted fallback still covers the rare case a
-    // player joined mid-run and never saw every objective packet themselves. Never overrides "wipe" -
-    // a genuine death event stays notable even in the rare case it's right after a kill.
-    if (end_reason != "wipe" && (dhuum_completed || fow_completed)) {
+    // dhuum_completed (Underworld) / fow_completed (Fissure of Woe) / dungeon_completed (any dungeon,
+    // off GAME_SMSG_DUNGEON_REWARD - see OnDungeonReward) are latched in real time off native
+    // packets - the same signals GWToolboxdll uses to mark its own objectives Completed, just
+    // observed here locally and immediately instead of from its ObjectiveTimerRuns_*.json file,
+    // which isn't flushed to disk until the next map load. This matters most for FoW/dungeons: FoW
+    // has no exit portal (a successful run is left by everyone resigning) and a cleared dungeon is
+    // often walked out of - without the latch that reads as "resign"/"unknown" and this opens a
+    // *failure* vote (or none) for a run that actually cleared, only corrected a map-load later once
+    // ProcessSync can read the objective file. ProcessSync's later IsRunCompleted fallback still
+    // covers the rare case a player joined mid-run and never saw the packet themselves. Never
+    // overrides "wipe" - a genuine death event stays notable even in the rare case it's right after
+    // a kill.
+    if (end_reason != "wipe" && (dhuum_completed || fow_completed || dungeon_completed)) {
         end_reason = "completed";
     }
     WriteLogEntry(pending_utc_start, pending_map_id, pending_character_name, end_reason, party_members);
@@ -1128,11 +1298,46 @@ void SCTracker::Update(float)
 {
     CaptureParty();
     FlushPendingRoleSkills();
+    ProcessDungeonRunLifecycle();
     ProcessSync();
     ProcessPermissionCheck();
     ProcessVoteSubmit();
     ProcessVersionCheck();
     ProcessPendingOutdatedNotice();
+}
+
+// Agent ids are fresh in each new dungeon instance, so after a level transition
+// agent_id_to_party_index holds stale Level-N ids and OnUpdateAgentState silently stops counting
+// deaths. Re-key it by roster position (players, then heroes, then henchmen - the order is stable
+// across a dungeon's levels). party_members and their accumulated .deaths are kept; only the
+// agent-id lookup and the alive/dead edge state are rebuilt (everyone is alive on load). Position
+// re-keying drifts if a player left mid-dungeon; acceptable for a rarely-hit partial run.
+void SCTracker::RebindPartyAgentsForNewLevel()
+{
+    agent_id_to_party_index.clear();
+    party_member_currently_dead.assign(party_members.size(), false);
+    const GW::PartyInfo* info = GW::PartyMgr::GetPartyInfo();
+    if (!info) {
+        return;
+    }
+    size_t i = 0;
+    const auto bind = [&](const uint32_t agent_id) {
+        if (i < party_members.size()) {
+            agent_id_to_party_index[agent_id] = i;
+        }
+        ++i;
+    };
+    for (const auto& player : info->players) {
+        if (const GW::Player* gwplayer = GW::PlayerMgr::GetPlayerByID(player.login_number)) {
+            bind(gwplayer->agent_id);
+        }
+    }
+    for (const auto& hero : info->heroes) {
+        bind(hero.agent_id);
+    }
+    for (const auto& hench : info->henchmen) {
+        bind(hench.agent_id);
+    }
 }
 
 void SCTracker::CaptureParty()

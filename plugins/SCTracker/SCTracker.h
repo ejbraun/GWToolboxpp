@@ -134,11 +134,21 @@ private:
     // IsAcceptablePartySize 8-man gate rejects the 1-player Mallyx instance.
     void OnInstanceLoadInfo(uint32_t map_id, bool is_explorable);
     void OnGameSrvTransfer();
+    // Run-end classification/log/vote, split out of OnGameSrvTransfer so a multi-level dungeon run
+    // (which OnGameSrvTransfer must defer across level portals - see pending_dungeon_entry) can be
+    // finalized once, when the dungeon is actually left, from OnInstanceLoadInfo or the
+    // ProcessDungeonRunLifecycle backstop.
+    void FinalizeRun();
+    void ProcessDungeonRunLifecycle();
+    // Re-key agent_id_to_party_index / reset the alive-dead edge state after a dungeon level load
+    // (agent ids are per-instance). Keeps party_members and their accumulated deaths.
+    void RebindPartyAgentsForNewLevel();
     void OnPartyDefeated();
     void OnWriteToChatLog(const wchar_t* message);
     void OnUpdateAgentState(uint32_t agent_id, uint32_t state);
     void OnAgentUpdateAllegiance(uint32_t agent_id, uint32_t allegiance_bits);
     void OnObjectiveDone(uint32_t objective_id);
+    void OnDungeonReward();
     void OnSkillUsed(uint32_t agent_id, GW::Constants::SkillID skill_id);
     void FlushPendingRoleSkills();
     void ProcessTrackedSkillUse(const std::string& skill_name);
@@ -222,6 +232,28 @@ private:
     std::unordered_set<uint32_t> fow_objectives_seen_done;
     bool fow_completed = false;
 
+    // --- Dungeon (multi-instance run) state ---
+    // A multi-level dungeon run spans 2-5 chained explorable instances (Level 1..N). It's captured
+    // once, on the entry level, and published under the entry-level map id (kDungeonLevelToEntry) -
+    // matching how GWToolboxdll builds one ObjectiveSet per dungeon keyed to the entry level.
+    // pending_dungeon_entry is that entry map id while such a run is in progress (0 otherwise, incl.
+    // for single-instance dungeons - Ooze Pit, Snowmen, Fronis, Slavers - which are tracked exactly
+    // like Domain of Anguish). A GameSrvTransfer while it's non-zero is deferred
+    // (dungeon_transfer_pending): OnInstanceLoadInfo then decides "next level" (keep the run) vs
+    // "dungeon over" (FinalizeRun); ProcessDungeonRunLifecycle finalizes after kDungeonExitGraceMs
+    // if no InstanceLoadInfo ever comes (crash/disconnect on the load screen). All reset on run start.
+    uint32_t pending_dungeon_entry = 0;
+    bool dungeon_transfer_pending = false;
+    uint64_t dungeon_transfer_tick = 0;
+    // time() of the current instance's load - the death-tracking-grace anchor (OnUpdateAgentState).
+    // Equals pending_utc_start for a single-instance run; bumped on each dungeon level load so the
+    // same spawn-in churn is ignored per level, not just on the first.
+    uint32_t current_level_started_at = 0;
+    // Dungeon analogue of dhuum_completed / fow_completed, latched off GAME_SMSG_DUNGEON_REWARD (see
+    // OnDungeonReward) so FinalizeRun classifies "completed" even when the party walks out rather
+    // than resigning. ProcessSync's IsRunCompleted fallback still covers a mid-run joiner.
+    bool dungeon_completed = false;
+
     uint32_t last_written_utc_start = 0; // for DrawSettings status display only
 
     GW::HookEntry InstanceLoadInfo_HookEntry;
@@ -235,6 +267,7 @@ private:
     GW::HookEntry ItemGeneral_HookEntry;
     GW::HookEntry ItemUpdateOwner_HookEntry;
     GW::HookEntry ObjectiveDone_HookEntry;
+    GW::HookEntry DungeonReward_HookEntry;
 
     // --- Backend sync ---
     void ProcessSync();

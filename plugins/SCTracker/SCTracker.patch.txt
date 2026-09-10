@@ -1,3 +1,20 @@
 ## v14 - 2026-09-04
 - Post-run vote popup now opens for role-less runs too (FoW at any size but the duo, Domain of
   Anguish) - lists the party's character names to credit/blame instead of roles.
+
+## v15 - 2026-09-09
+- Latch FoW completion in real time (all 11 quest objectives done) so a cleared duo opens an MVP
+  vote instead of a failure vote; drop runs on terminal publish failures.
+- Track Miniature Thul Za Dhuum item drops.
+
+## v16 - 2026-09-10
+- Track every Eye of the North dungeon GWToolboxdll's Objective Timer follows (Catacombs of
+  Kathandrax, Cathedral of Flames, Frostmaw's Burrows, Slavers' Exile, ... - 18 in all), at every
+  party size 1-8 (all-human parties). Role-less, character-name post-run vote, same as Domain of
+  Anguish / low-man Fissure of Woe.
+- Multi-level dungeons are tracked as one run spanning every Level 1..N instance: the party is
+  captured once on the entry level and the run is published under the entry-level map id. Deaths,
+  wipe and resign are accumulated across all levels; a GameSrvTransfer between levels no longer
+  ends the run.
+- Real-time completion latch off the dungeon-reward packet, so a cleared dungeon opens an MVP vote
+  at the reward screen even when the party walks out rather than resigning.

@@ -20,12 +20,15 @@
 #include <enumUtils.h>
 #include <AsyncStringDecoder.h>
 
+#include <cmath>
+
 namespace {
     GW::HookEntry InstanceLoadFile_Entry;
     GW::HookEntry UseItem_Entry;
     GW::HookEntry ManipulateMapObject_Entry;
     GW::HookEntry DungeonReward_Entry;
     GW::HookEntry CountdownStart_Entry;
+    GW::HookEntry MissionProgress_Entry;
 
     bool isTargetableMiniPet(uint32_t itemId) 
     {
@@ -65,12 +68,49 @@ void InstanceInfo::resetRuntime()
     using namespace std::chrono_literals;
     mpStatus.poppedMinipetId = std::nullopt;
     mpStatus.lastPop = std::chrono::steady_clock::now() - 1h;
+    const auto lock = std::scoped_lock(missionProgressMutex);
+    missionProgressId.reset();
+    missionProgress.reset();
+}
+
+std::optional<float> InstanceInfo::getInstanceProgress() const
+{
+    const auto lock = std::scoped_lock(missionProgressMutex);
+    return missionProgress;
+}
+
+void InstanceInfo::onMissionProgress(const uint8_t id, const float filled, const bool created)
+{
+    const auto lock = std::scoped_lock(missionProgressMutex);
+    if (!trackingMissionProgress || (!created && missionProgressId && *missionProgressId != id)) return;
+    missionProgressId = id;
+    if (!std::isfinite(filled) || filled < 0.f || filled > 1.f) {
+        missionProgress.reset();
+        return;
+    }
+    missionProgress = filled;
 }
 
 void InstanceInfo::initialize()
 {
     resetRuntime();
     ++instanceId;
+    {
+        const auto lock = std::scoped_lock(missionProgressMutex);
+        trackingMissionProgress = true;
+    }
+    GW::StoC::RegisterPacketCallback<GW::Packet::StoC::GameSrvTransfer>(&MissionProgress_Entry, [this](GW::HookStatus*, const auto*) {
+        const auto lock = std::scoped_lock(missionProgressMutex);
+        missionProgressId.reset();
+        missionProgress.reset();
+    });
+    // Progress context pointers can be absent or stale; retain values delivered by the server instead.
+    GW::StoC::RegisterPacketCallback<GW::Packet::StoC::CreateMissionProgress>(&MissionProgress_Entry, [this](GW::HookStatus* status, const auto* packet) {
+        if (packet && !status->blocked) onMissionProgress(packet->id, packet->filled, true);
+    }, 0x8000);
+    GW::StoC::RegisterPacketCallback<GW::Packet::StoC::UpdateMissionProgress>(&MissionProgress_Entry, [this](GW::HookStatus* status, const auto* packet) {
+        if (packet && !status->blocked) onMissionProgress(packet->id, packet->filled, false);
+    }, 0x8000);
     GW::StoC::RegisterPostPacketCallback<GW::Packet::StoC::InstanceLoadFile>(&InstanceLoadFile_Entry, [this](GW::HookStatus*, const GW::Packet::StoC::InstanceLoadFile*) {
         resetRuntime();
         ++instanceId;
@@ -124,6 +164,13 @@ void InstanceInfo::initialize()
 
 void InstanceInfo::terminate() 
 {
+    {
+        const auto lock = std::scoped_lock(missionProgressMutex);
+        trackingMissionProgress = false;
+        missionProgressId.reset();
+        missionProgress.reset();
+    }
+    GW::StoC::RemoveCallbacks(&MissionProgress_Entry);
     GW::StoC::RemovePostCallback<GW::Packet::StoC::InstanceLoadFile>(&InstanceLoadFile_Entry);
     // Fixed: was RemovePostCallback — wrong table for callbacks registered with RegisterPacketCallback; callbacks were never removed.
     GW::StoC::RemoveCallback<GW::Packet::StoC::DungeonReward>(&DungeonReward_Entry);

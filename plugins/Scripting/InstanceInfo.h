@@ -6,6 +6,8 @@
 #include <GWCA/GameEntities/Agent.h>
 
 #include <chrono>
+#include <mutex>
+#include <optional>
 #include <unordered_map>
 
 // Contains information about the current instance which either has to be kept between function calls or is expensive to compute
@@ -25,6 +27,7 @@ public:
     
     bool canPopAgent() const;
     bool hasMinipetPopped() const;
+    std::optional<float> getInstanceProgress() const;
     int getInstanceId() const { return instanceId; }
     void storeTarget(const GW::AgentLiving* agent, int storageId);
     const GW::AgentLiving* retrieveTarget(int storageId) const;
@@ -41,6 +44,7 @@ private:
 
     InstanceInfo() = default;
     void resetRuntime();
+    void onMissionProgress(uint8_t id, float filled, bool created);
     std::unordered_map<GW::AgentID, std::wstring> decodedAgentNames;
     std::unordered_map<uint32_t, std::wstring> decodedItemNames;
     std::unordered_map<int, GW::AgentID> storedTargets;
@@ -50,4 +54,8 @@ private:
     bool instanceIsCompleted = false;
     MiniPetStatus mpStatus;
     uint64_t decodeGeneration = 0;
+    mutable std::mutex missionProgressMutex;
+    bool trackingMissionProgress = false;
+    std::optional<uint8_t> missionProgressId;
+    std::optional<float> missionProgress;
 };

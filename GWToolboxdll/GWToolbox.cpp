@@ -378,7 +378,11 @@ namespace {
         };
 
         std::array patches{
-            HotPatch{"target filter bypass", 0x1913, {0xff, 0x37, 0x00}, {0xeb, 0x3c, 0x00}, 2}
+            HotPatch{"target filter bypass", 0x1913, {0xff, 0x37, 0x00}, {0xeb, 0x3c, 0x00}, 2},
+            // The Game frame can be recreated after the first lookup; the cached pointer is never invalidated.
+            HotPatch{"refresh key input frame", 0x14b60, {0x75, 0x10, 0x00}, {0x90, 0x90, 0x00}, 2},
+            // Enqueue now runs inline on the game thread unless forced, collapsing key-down/up into one tick.
+            HotPatch{"defer key release", 0x16bea, {0x6a, 0x00, 0x00}, {0x6a, 0x01, 0x00}, 2}
         };
 
         if (!module) return false;
@@ -408,7 +412,8 @@ namespace {
                     DWORD ignored = 0;
                     VirtualProtect(module_bytes + previous->rva, previous->size, previous->old_protection, &ignored);
                 }
-                Log::Log("[LoadGWCADll] VirtualProtect failed for %s hot-patch: &lu", patch.name, protect_error);
+                Log::Log("[LoadGWCADll] VirtualProtect failed for %s hot-patch: %lu", patch.name, protect_error);
+                return false;
             }
             ++protected_count;
         }
@@ -425,7 +430,8 @@ namespace {
             if (!patch->needs_write) continue;
             DWORD ignored = 0;
             if (!VirtualProtect(module_bytes + patch->rva, patch->size, patch->old_protection, &ignored)) {
-                Log::Log("[LoadGWCADll] protection restore failed for %s hot-patch: &lu", patch->name, GetLastError());
+                Log::Log("[LoadGWCADll] protection restore failed for %s hot-patch: %lu", patch->name, GetLastError());
+                finalization_succeeded = false;
             }
         }
         for (const auto& patch : patches) {
@@ -702,12 +708,13 @@ namespace {
             // Send button up mouse events to everything, to avoid being stuck on mouse-down
             case WM_INPUT: {
                 if (right_mouse_down && !mouse_moved_whilst_right_clicking && GET_RAWINPUT_CODE_WPARAM(wParam) == RIM_INPUT && lParam) {
-                    BYTE lpb[128];
-                    UINT dwSize = _countof(lpb);
-                    ASSERT(GetRawInputData((HRAWINPUT)lParam, RID_INPUT, lpb, &dwSize, sizeof(RAWINPUTHEADER)) < dwSize);
-
-                    const RAWINPUT* raw = (RAWINPUT*)lpb;
-                    if ((raw->data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) == 0 && raw->data.mouse.lLastX && raw->data.mouse.lLastY) {
+                    RAWINPUT raw{};
+                    auto size = static_cast<UINT>(sizeof(raw));
+                    const auto bytes_read = GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT, &raw, &size, sizeof(RAWINPUTHEADER));
+                    const auto mouse_size = offsetof(RAWINPUT, data) + sizeof(RAWMOUSE);
+                    if (bytes_read != static_cast<UINT>(-1) && bytes_read >= mouse_size && bytes_read <= sizeof(raw)
+                        && raw.header.dwSize >= mouse_size && raw.header.dwSize <= bytes_read && raw.header.dwType == RIM_TYPEMOUSE
+                        && (raw.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) == 0 && (raw.data.mouse.lLastX || raw.data.mouse.lLastY)) {
                         // If its a relative mouse move, process the action
                         mouse_moved_whilst_right_clicking = true;
                     }

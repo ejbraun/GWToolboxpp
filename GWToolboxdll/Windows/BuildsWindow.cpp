@@ -63,36 +63,14 @@ namespace {
         const auto current_skill_bar = GW::SkillbarMgr::GetSkillbar(agent_id);
         if (!current_skill_bar || !current_skill_bar->IsValid()) return false;
 
-        GW::SkillbarMgr::SkillTemplate skill_template;
+        GW::SkillbarMgr::SkillTemplate skill_template{};
         if (!GW::SkillbarMgr::GetSkillTemplate(agent_id, skill_template)) return false;
 
-        char build_code[128];
-        if (GW::SkillbarMgr::EncodeSkillTemplate(skill_template, build_code, sizeof(build_code))) {
-            build.code = build_code;
-        }
-
-        build.name = std::format("{}/{}", ToolboxUtils::GetProfessionAcronym(skill_template.primary)->string(), ToolboxUtils::GetProfessionAcronym(skill_template.secondary)->string());
-
-        wchar_t encoded_name[8] = {0};
-
-        for (size_t i = 0; i < 8; i++) {
-            const auto skill_id = skill_template.skills[i];
-            if (skill_id != GW::Constants::SkillID(0)) {
-                const auto* skill_data = GW::SkillbarMgr::GetSkillConstantData(skill_id);
-                if (skill_data && skill_data->IsElite()) {
-                    GW::UI::UInt32ToEncStr(skill_data->name, encoded_name, _countof(encoded_name));
-                    GW::UI::AsyncDecodeStr(
-                        encoded_name,
-                        [](void* param, const wchar_t* s) {
-                            if (s && *s)
-                                static_cast<Build*>(param)->name += std::format(" - {}", TextUtils::WStringToString(s));
-                        },
-                        &build
-                    );
-                    break;
-                }
-            }
-        }
+        char build_code[128]{};
+        if (!GW::SkillbarMgr::EncodeSkillTemplate(skill_template, build_code, sizeof(build_code))) return false;
+        build.code = build_code;
+        build.ResetDecodeCache();
+        build.UpdateNameFromTemplate(true);
         return true;
     }
 
@@ -642,12 +620,13 @@ namespace {
             file.preferred_skill_orders.push_back(build.code);
         }
 
-        for (const auto& tbuild : teambuilds) {
+        for (auto& tbuild : teambuilds) {
             auto& entry = file.teambuilds.emplace_back();
             entry.name = tbuild.name;
             entry.ui_id = tbuild.ui_id;
             entry.show_numbers = tbuild.show_numbers;
-            for (const auto& build : tbuild.builds) {
+            for (auto& build : tbuild.builds) {
+                build.UpdateNameFromTemplate();
                 auto& build_entry = entry.builds.emplace_back();
                 build_entry.name = build.name;
                 build_entry.code = build.code;
@@ -858,8 +837,11 @@ void BuildsWindow::Update(const float)
     static bool old_visible = false;
     bool cur_visible = false;
     cur_visible |= visible;
-    for (const auto& tbuild : teambuilds) {
+    for (auto& tbuild : teambuilds) {
         cur_visible |= tbuild.edit_open;
+        for (auto& build : tbuild.builds) {
+            builds_changed |= build.UpdateNameFromTemplate();
+        }
     }
 
     if (cur_visible != old_visible) {

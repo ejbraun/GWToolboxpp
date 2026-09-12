@@ -16,8 +16,6 @@
 #include <GWCA/GameEntities/Attribute.h>
 #include <GWCA/GameEntities/Quest.h>
 
-#include <GWCA/Context/GameContext.h>
-#include <GWCA/Context/CharContext.h>
 #include <GWCA/Context/WorldContext.h>
 
 #include <GWCA/Managers/MapMgr.h>
@@ -535,7 +533,8 @@ void InstanceProgressCondition::serialize(OutputStream& stream) const
 }
 bool InstanceProgressCondition::check() const
 {
-    return compare(GW::GetGameContext()->character->progress_bar->progress * 100.f, comp, requiredProgress);
+    const auto progress = InstanceInfo::getInstance().getInstanceProgress();
+    return progress && compare(*progress * 100.f, comp, requiredProgress);
 }
 bool InstanceProgressCondition::drawSettings()
 {
@@ -672,11 +671,12 @@ bool PlayerHasSkillCondition::check() const
                 return skill.GetRecharge() == 0;
             case HasSkillRequirement::ReadyToUse:
                 if (player->skill) return false;
-                const auto& skilldata = *GW::SkillbarMgr::GetSkillConstantData(skill.skill_id);
+                const auto skilldata = GW::SkillbarMgr::GetSkillConstantData(skill.skill_id);
+                if (!skilldata) return false;
                 if (skill.GetRecharge() > 0) return false;
-                if (skill.adrenaline_a < skilldata.adrenaline) return false;
-                if (getEnergyCost(skilldata) > player->energy * player->max_energy) return false;
-                return weaponFulfillsRequirement((EquippedWeaponType)player->weapon_type, (WeaponRequirement)skilldata.weapon_req, skilldata.type);
+                if (skill.adrenaline_a < skilldata->adrenaline) return false;
+                if (getEnergyCost(*skilldata) > player->energy * player->max_energy) return false;
+                return weaponFulfillsRequirement((EquippedWeaponType)player->weapon_type, (WeaponRequirement)skilldata->weapon_req, skilldata->type);
         }
         return false;
     });
@@ -734,14 +734,15 @@ bool HeroHasSkillCondition::check() const
             case HasSkillRequirement::ReadyToUse:
             {
                 if (skillBarSkill->GetRecharge() > 0) return false;
-                const auto& skilldata = *GW::SkillbarMgr::GetSkillConstantData(skillBarSkill->skill_id);
-                if (skillBarSkill->adrenaline_a < skilldata.adrenaline) return false;
-                if (getEnergyCost(skilldata) > player->energy * player->max_energy) return false;
+                const auto skilldata = GW::SkillbarMgr::GetSkillConstantData(skillBarSkill->skill_id);
+                if (!skilldata) return false;
+                if (skillBarSkill->adrenaline_a < skilldata->adrenaline) return false;
+                if (getEnergyCost(*skilldata) > player->energy * player->max_energy) return false;
 
                 const auto hero = GW::Agents::GetAgentByID(agentId);
                 if (!hero || !hero->GetIsLivingType()) return true; // Hero is out of range, assume it's fine
                 if (hero->GetAsAgentLiving()->skill) return false;
-                return weaponFulfillsRequirement((EquippedWeaponType)hero->GetAsAgentLiving()->weapon_type, (WeaponRequirement)skilldata.weapon_req, skilldata.type);
+                return weaponFulfillsRequirement((EquippedWeaponType)hero->GetAsAgentLiving()->weapon_type, (WeaponRequirement)skilldata->weapon_req, skilldata->type);
             }
             default:
                 return false;
@@ -806,11 +807,12 @@ bool PlayerHasSkillBySlotCondition::check() const
         return skill.GetRecharge() == 0;
     case HasSkillRequirement::ReadyToUse:
         if (player->skill) return false;
-        const auto& skilldata = *GW::SkillbarMgr::GetSkillConstantData(skill.skill_id);
+        const auto skilldata = GW::SkillbarMgr::GetSkillConstantData(skill.skill_id);
+        if (!skilldata) return false;
         if (skill.GetRecharge() > 0) return false;
-        if (skill.adrenaline_a < skilldata.adrenaline) return false;
-        if (getEnergyCost(skilldata) > player->energy * player->max_energy) return false;
-        return weaponFulfillsRequirement((EquippedWeaponType)player->weapon_type, (WeaponRequirement)skilldata.weapon_req, skilldata.type);
+        if (skill.adrenaline_a < skilldata->adrenaline) return false;
+        if (getEnergyCost(*skilldata) > player->energy * player->max_energy) return false;
+        return weaponFulfillsRequirement((EquippedWeaponType)player->weapon_type, (WeaponRequirement)skilldata->weapon_req, skilldata->type);
     }
     return false;
 }

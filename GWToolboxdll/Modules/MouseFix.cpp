@@ -4,7 +4,8 @@
 #include <GWCA/Utilities/Hooker.h>
 #include <GWCA/Utilities/Scanner.h>
 
-#include <GWCA/Managers/GameThreadMgr.h>
+#include <atomic>
+#include <limits>
 #include <GWCA/Managers/MemoryMgr.h>
 
 #include <Defines.h>
@@ -71,11 +72,7 @@ namespace {
     };
 
     GwMouseMove* gw_mouse_move = nullptr;
-    // OsInput event id for "mouse moved while the camera is captured". ArenaNet shuffles this
-    // enum between builds, so it's read out of the WM_MOUSEMOVE handler rather than hard coded.
-    uint32_t mouse_look_event_id = 0;
-    LONG rawInputRelativePosX = 0;
-    LONG rawInputRelativePosY = 0;
+    // ArenaNet shuffles OsInput event IDs between builds; the native handler now supplies the camera event.
     bool* HasRegisteredTrackMouseEvent = nullptr;
     using SetCursorPosCenter_pt = void(__cdecl*)(GwMouseMove* wParam);
     SetCursorPosCenter_pt SetCursorPosCenter_Func = nullptr;
@@ -94,19 +91,24 @@ namespace {
     void OnSetCursorPosCenter(GwMouseMove* gwmm)
     {
         GW::Hook::EnterHook();
-        if (!ShouldFixCursor())
-            return GW::Hook::LeaveHook();
+        const auto gw_window_handle = GW::MemoryMgr::GetGWWindowHandle();
         // @Enhancement: Maybe assert that gwmm == gw_mouse_move?
-        const HWND gw_window_handle = GetFocus();
         // @Enhancement: Maybe check that the focussed window handle is the GW window handle?
-        RECT rect;
-        if (!(gw_window_handle && GetClientRect(gw_window_handle, &rect))) {
-            return GW::Hook::LeaveHook();
+        RECT rect{};
+        POINT center{};
+        if (ShouldFixCursor() && gwmm && gwmm == gw_mouse_move && gw_window_handle
+            && GetForegroundWindow() == gw_window_handle && GetClientRect(gw_window_handle, &rect)) {
+            center = {(rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2};
+            if (ClientToScreen(gw_window_handle, &center) && SetCursorPos(center.x, center.y)) {
+                gwmm->center_x = center.x;
+                gwmm->center_y = center.y;
+                GW::Hook::LeaveHook();
+                return;
+            }
         }
-        gwmm->center_x = (rect.left + rect.right) / 2;
-        gwmm->center_y = (rect.bottom + rect.top) / 2;
-        rawInputRelativePosX = rawInputRelativePosY = 0;
-        SetPhysicalCursorPos(gwmm->captured_x, gwmm->captured_y);
+        if (gwmm && SetCursorPosCenter_Ret) {
+            SetCursorPosCenter_Ret(gwmm);
+        }
         GW::Hook::LeaveHook();
     }
 
@@ -114,59 +116,34 @@ namespace {
     bool OnProcessInput(uint32_t* wParam, uint32_t* lParam)
     {
         GW::Hook::EnterHook();
-        if (!(ShouldFixCursor() && HasRegisteredTrackMouseEvent && gw_mouse_move && mouse_look_event_id)) {
-            goto forward_call; // Failed to find addresses for variables
+        if (!(wParam && lParam && ProcessInput_Ret)) {
+            GW::Hook::LeaveHook();
+            return false;
         }
-        if (!(wParam && wParam[1] == 0x200)) {
-            goto forward_call; // Not mouse movement
-        }
-        if (!(*HasRegisteredTrackMouseEvent && gw_mouse_move->move_camera)) {
-            goto forward_call; // Not moving the camera, or GW hasn't yet called TrackMouseEvent
-        }
-
-        lParam[0] = mouse_look_event_id;
-        // Set the output parameters to be the relative position of the mouse to the center of the screen
-        // NB: Original function uses ClientToScreen here; we've already grabbed the correct value via CursorFixWndProc
-        lParam[1] = rawInputRelativePosX;
-        lParam[2] = rawInputRelativePosY;
-
-        // Reset the cursor position to the middle of the viewport
-        OnSetCursorPosCenter(gw_mouse_move);
-        GW::Hook::LeaveHook();
-        return true;
-    forward_call:
-        GW::Hook::LeaveHook();
-        return ProcessInput_Ret(wParam, lParam);
-    }
-
-    void CursorFixWndProc(const UINT Message, const WPARAM wParam, const LPARAM lParam)
-    {
-        if (!(Message == WM_INPUT && GET_RAWINPUT_CODE_WPARAM(wParam) == RIM_INPUT && lParam)) {
-            return; // Not raw input
-        }
-        if (!ShouldFixCursor()) {
-            return; // No gw mouse move ptr; this shouldn't happen
-        }
-
-        BYTE lpb[128];
-        UINT dwSize = _countof(lpb);
-        ASSERT(GetRawInputData((HRAWINPUT)lParam, RID_INPUT, lpb, &dwSize, sizeof(RAWINPUTHEADER)) < dwSize);
-
-        const RAWINPUT* raw = reinterpret_cast<RAWINPUT*>(lpb);
-        if ((raw->data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) == 0) {
-            if (gw_mouse_move->move_camera) {
-                rawInputRelativePosX += raw->data.mouse.lLastX;
-                rawInputRelativePosY += raw->data.mouse.lLastY;
-            }
-            else {
-                rawInputRelativePosX = rawInputRelativePosY = 0;
+        auto input = wParam;
+        std::array<uint32_t, 4> current_message{};
+        if (ShouldFixCursor() && HasRegisteredTrackMouseEvent && gw_mouse_move
+            && wParam[1] == WM_MOUSEMOVE && *HasRegisteredTrackMouseEvent && gw_mouse_move->move_camera) {
+            const auto hwnd = GW::MemoryMgr::GetGWWindowHandle();
+            POINT cursor{};
+            if (hwnd && reinterpret_cast<HWND>(wParam[0]) == hwnd && GetForegroundWindow() == hwnd
+                && GetCursorPos(&cursor) && ScreenToClient(hwnd, &cursor)
+                && cursor.x >= std::numeric_limits<short>::min() && cursor.x <= std::numeric_limits<short>::max()
+                && cursor.y >= std::numeric_limits<short>::min() && cursor.y <= std::numeric_limits<short>::max()) {
+                // Queued WM_MOUSEMOVE coordinates can predate a cursor warp and produce a false camera delta.
+                current_message = {wParam[0], wParam[1], wParam[2], static_cast<uint32_t>(MAKELPARAM(cursor.x, cursor.y))};
+                input = current_message.data();
             }
         }
+        // Native ClientToScreen and viewport recentering preserve Windows pointer speed, acceleration and DPI handling.
+        const auto result = ProcessInput_Ret(input, lParam);
+        GW::Hook::LeaveHook();
+        return result;
     }
 
     bool CursorFixInitialise()
     {
-        if (gw_mouse_move) {
+        if (initialized) {
             return true;
         }
         const auto hwnd = GW::MemoryMgr::GetGWWindowHandle();
@@ -184,7 +161,7 @@ namespace {
                 gw_mouse_move = (GwMouseMove*)(HasRegisteredTrackMouseEvent - 0x28);
             }
         }
-        mouse_look_event_id = 0x11; // AI thought it would be a good idea to scan for this...
+        // The former fixed 0x11 value followed a failed event-ID scan; native dispatch avoids that dependency.
         SetCursorPosCenter_Func = (SetCursorPosCenter_pt)GW::Scanner::ToFunctionStart(GW::Scanner::FindAssertion("OsInput.cpp", "basis", 0, 0));
         DEBUG_ASSERT(ProcessInput_Func);
         DEBUG_ASSERT(SetCursorPosCenter_Func);
@@ -195,31 +172,34 @@ namespace {
         GWCA_INFO("[SCAN] HasRegisteredTrackMouseEvent = %p", HasRegisteredTrackMouseEvent);
         GWCA_INFO("[SCAN] gw_mouse_move = %p", gw_mouse_move);
         GWCA_INFO("[SCAN] SetCursorPosCenter_Func = %p", SetCursorPosCenter_Func);
-        GWCA_INFO("[SCAN] mouse_look_event_id = 0x%02x", mouse_look_event_id);
 
 #ifdef _DEBUG
         //ASSERT(ProcessInput_Func && HasRegisteredTrackMouseEvent && gw_mouse_move && SetCursorPosCenter_Func);
 #endif
-        if (ProcessInput_Func && HasRegisteredTrackMouseEvent && gw_mouse_move && SetCursorPosCenter_Func && mouse_look_event_id) {
-            GW::Hook::CreateHook((void**)&ProcessInput_Func, OnProcessInput, reinterpret_cast<void**>(&ProcessInput_Ret));
-            GW::Hook::CreateHook((void**)&SetCursorPosCenter_Func, OnSetCursorPosCenter, reinterpret_cast<void**>(&SetCursorPosCenter_Ret));
-        }            
-
-        return gw_mouse_move != nullptr;
+        if (!(ProcessInput_Func && HasRegisteredTrackMouseEvent && gw_mouse_move && SetCursorPosCenter_Func)) {
+            return false;
+        }
+        if (GW::Hook::CreateHook((void**)&ProcessInput_Func, OnProcessInput, reinterpret_cast<void**>(&ProcessInput_Ret)) != 0) {
+            return false;
+        }
+        if (GW::Hook::CreateHook((void**)&SetCursorPosCenter_Func, OnSetCursorPosCenter, reinterpret_cast<void**>(&SetCursorPosCenter_Ret)) != 0) {
+            GW::Hook::RemoveHook(ProcessInput_Func);
+            ProcessInput_Ret = nullptr;
+            return false;
+        }
+        initialized = true;
+        return true;
     }
 
     void CursorFixEnable(const bool enable)
     {
-        CursorFixInitialise();
-        if (!(ProcessInput_Func && HasRegisteredTrackMouseEvent && gw_mouse_move && SetCursorPosCenter_Func && mouse_look_event_id))
-            return;
-        if (!enable) {
-            GW::Hook::DisableHooks(ProcessInput_Func);
-            GW::Hook::DisableHooks(SetCursorPosCenter_Func);
-        }
-        else {
+        if (enable && CursorFixInitialise()) {
             GW::Hook::EnableHooks(ProcessInput_Func);
             GW::Hook::EnableHooks(SetCursorPosCenter_Func);
+        }
+        else if (initialized) {
+            GW::Hook::DisableHooks(ProcessInput_Func);
+            GW::Hook::DisableHooks(SetCursorPosCenter_Func);
         }
     }
 
@@ -344,49 +324,51 @@ namespace {
     ChangeCursorIcon_pt ChangeCursorIcon_Func = nullptr, ChangeCursorIcon_Ret = nullptr;
 
     struct CachedCursorData {
-        uint32_t cursor_type;
-        std::vector<uint8_t> bitmap_data;
-        std::vector<uint8_t> bitmap_mask;
-        uint32_t hotspot[2];
+        uint32_t cursor_type = 0;
+        std::array<uint8_t, 32 * 32 * 4> bitmap_data{};
+        std::array<uint8_t, 32 * 32> bitmap_mask{};
+        uint32_t hotspot[2]{};
         bool is_valid = false;
     };
 
     CachedCursorData cached_cursor;
+    std::mutex cursor_mutex;
+    std::atomic<bool> redraw_cursor_pending = false;
 
-    void __fastcall OnChangeCursorIcon(Win32WindowUserData* user_data, uint32_t edx, uint32_t cursor_type, void* bitmap_data, void* bitmap_mask, uint32_t* hotspot)
+    void ApplyCursorIcon(Win32WindowUserData* user_data, uint32_t edx, uint32_t cursor_type, void* bitmap_data, void* bitmap_mask, uint32_t* hotspot)
     {
-        GW::Hook::EnterHook();
-
-        if (bitmap_data && bitmap_mask && hotspot) {
+        const std::scoped_lock lock(cursor_mutex);
+        if (!(user_data && ChangeCursorIcon_Ret)) {
+            return;
+        }
+        cached_cursor.is_valid = false;
+        if (bitmap_data && bitmap_mask && hotspot && (cursor_type == 0 || cursor_type == 5)) {
             cached_cursor.cursor_type = cursor_type;
 
             size_t bitmap_size;
             if (cursor_type == 0) {
                 bitmap_size = 32 * 32 * 4; // 32-bit color (RGBA)
             }
-            else if (cursor_type == 5) {
+            else {
                 bitmap_size = 32 * 32 * 2; // 16-bit color
             }
-            else {
-                bitmap_size = 32 * 32 * 4; // Default to 32-bit
+            // Other formats are not supported by the native cursor creator; do not guess a 32-bit size.
+            if (bitmap_data != cached_cursor.bitmap_data.data()) {
+                memcpy(cached_cursor.bitmap_data.data(), bitmap_data, bitmap_size);
             }
-
-            cached_cursor.bitmap_data.resize(bitmap_size);
-            memcpy(cached_cursor.bitmap_data.data(), bitmap_data, bitmap_size);
-
-            cached_cursor.bitmap_mask.resize(32 * 32 * 4);
-            memcpy(cached_cursor.bitmap_mask.data(), bitmap_mask, 32 * 32 * 4);
-
+            // GW supplies one byte per mask pixel and packs it into a monochrome bitmap itself.
+            if (bitmap_mask != cached_cursor.bitmap_mask.data()) {
+                memcpy(cached_cursor.bitmap_mask.data(), bitmap_mask, cached_cursor.bitmap_mask.size());
+            }
             cached_cursor.hotspot[0] = hotspot[0];
             cached_cursor.hotspot[1] = hotspot[1];
-
             cached_cursor.is_valid = true;
         }
 
         ChangeCursorIcon_Ret(user_data, edx, cursor_type, bitmap_data, bitmap_mask, hotspot);
 
-        if (settings.cursor_size < 0 || settings.cursor_size > 64 || settings.cursor_size == 32) {
-            return GW::Hook::LeaveHook();
+        if (settings.cursor_size < 16 || settings.cursor_size > 64 || settings.cursor_size == 32) {
+            return;
         }
 
 
@@ -394,14 +376,14 @@ namespace {
         HWND* window_handle = &user_data->window_handle;
 
         if (!(user_data && *cursor && *cursor != current_cursor)) {
-            return GW::Hook::LeaveHook();
+            return;
         }
         const HCURSOR new_cursor = ScaleCursor(*cursor, settings.cursor_size);
         if (!new_cursor) {
-            return GW::Hook::LeaveHook();
+            return;
         }
         if (*cursor == new_cursor) {
-            return GW::Hook::LeaveHook();
+            return;
         }
         if (*cursor) {
             // Don't forget to free the original cursor before overwriting the handle
@@ -414,25 +396,24 @@ namespace {
         SetCursor(new_cursor);
         SetClassLongA(*window_handle, GCL_HCURSOR, reinterpret_cast<LONG>(new_cursor));
         current_cursor = new_cursor;
+    }
+
+    void __fastcall OnChangeCursorIcon(Win32WindowUserData* user_data, uint32_t edx, uint32_t cursor_type, void* bitmap_data, void* bitmap_mask, uint32_t* hotspot)
+    {
+        GW::Hook::EnterHook();
+        ApplyCursorIcon(user_data, edx, cursor_type, bitmap_data, bitmap_mask, hotspot);
         GW::Hook::LeaveHook();
     }
 
     void RedrawCursorIcon()
     {
-        GW::GameThread::Enqueue([] {
-            const auto user_data = Win32WindowUserData::Instance();
-            current_cursor = nullptr;
-            if (user_data && ChangeCursorIcon_Func && cached_cursor.is_valid) {
-                ChangeCursorIcon_Func(user_data,0,
-                    cached_cursor.cursor_type, cached_cursor.bitmap_data.data(), cached_cursor.bitmap_mask.data(), cached_cursor.hotspot
-                );
-            }
-        });
+        // Update owns this request so no queued callback can outlive the module.
+        redraw_cursor_pending = true;
     }
 
     void SetCursorSize(const int new_size)
     {
-        settings.cursor_size = new_size;
+        settings.cursor_size = std::clamp(new_size, 16, 64);
         RedrawCursorIcon();
     }
 
@@ -457,8 +438,9 @@ void MouseFix::Initialize()
     SettingsRegistry::Register(this, settings);
 
     ChangeCursorIcon_Func = (ChangeCursorIcon_pt)GW::Scanner::ToFunctionStart(GW::Scanner::Find("\x80\x7e\x01\x80", "xxxx"));
-    if (ChangeCursorIcon_Func) {
-        GW::Hook::CreateHook((void**)&ChangeCursorIcon_Func, OnChangeCursorIcon, (void**)&ChangeCursorIcon_Ret);
+    if (ChangeCursorIcon_Func
+        && GW::Hook::CreateHook((void**)&ChangeCursorIcon_Func, OnChangeCursorIcon, (void**)&ChangeCursorIcon_Ret) == 0) {
+        cursor_size_hooked = true;
         GW::Hook::EnableHooks(ChangeCursorIcon_Func);
     }
 
@@ -481,6 +463,7 @@ void MouseFix::LoadSettings(SettingsDoc& doc, ToolboxIni* legacy)
     ToolboxModule::LoadSettings(doc, legacy);
     doc.GetStruct(Name(), settings);
     SetCursorSize(settings.cursor_size);
+    CursorFixEnable(settings.enable_cursor_fix);
 }
 
 void MouseFix::SaveSettings(SettingsDoc& doc)
@@ -489,15 +472,45 @@ void MouseFix::SaveSettings(SettingsDoc& doc)
     doc.SetStruct(Name(), settings);
 }
 
+void MouseFix::Update(float)
+{
+    if (!redraw_cursor_pending.exchange(false)) return;
+    CachedCursorData cursor_data;
+    {
+        const std::scoped_lock lock(cursor_mutex);
+        if (!(cursor_size_hooked && cached_cursor.is_valid)) return;
+        cursor_data = cached_cursor;
+        current_cursor = nullptr;
+    }
+    if (const auto user_data = Win32WindowUserData::Instance(); user_data && ChangeCursorIcon_Func) {
+        ChangeCursorIcon_Func(user_data, 0, cursor_data.cursor_type,
+                             cursor_data.bitmap_data.data(), cursor_data.bitmap_mask.data(), cursor_data.hotspot);
+    }
+}
+
 void MouseFix::Terminate()
 {
     ToolboxModule::Terminate();
     CursorFixEnable(false);
     GW::UI::RemoveUIMessageCallback(&UIMessage_HookEntry);
-    GW::Hook::RemoveHook(ChangeCursorIcon_Func);
-
+    if (initialized) {
+        GW::Hook::RemoveHook(ProcessInput_Func);
+        GW::Hook::RemoveHook(SetCursorPosCenter_Func);
+    }
+    if (cursor_size_hooked) {
+        GW::Hook::DisableHooks(ChangeCursorIcon_Func);
+        GW::Hook::RemoveHook(ChangeCursorIcon_Func);
+    }
+    const std::scoped_lock lock(cursor_mutex);
+    redraw_cursor_pending = false;
+    cached_cursor = {};
+    current_cursor = nullptr;
+    cursor_size_hooked = initialized = false;
+    ProcessInput_Func = ProcessInput_Ret = nullptr;
+    SetCursorPosCenter_Func = SetCursorPosCenter_Ret = nullptr;
+    ChangeCursorIcon_Func = ChangeCursorIcon_Ret = nullptr;
+    HasRegisteredTrackMouseEvent = nullptr;
     gw_mouse_move = nullptr;
-
 }
 
 void MouseFix::DrawSettingsInternal()
@@ -510,23 +523,16 @@ void MouseFix::DrawSettingsInternal()
         "Right click to make the cursor dis- and reappear for this to take effect.");
     if (ImGui::IsItemDeactivatedAfterEdit()) {
         SetCursorSize(settings.cursor_size);
-        RedrawCursorIcon();
     }
     if (ImGui::Button("Reset")) {
         SetCursorSize(32);
-        RedrawCursorIcon();
     }
 }
 
-bool MouseFix::WndProc(const UINT Message, const WPARAM wParam, const LPARAM lParam)
+bool MouseFix::WndProc(const UINT, const WPARAM, const LPARAM)
 {
-    if (!ShouldFixCursor()) {
-        return false;
-    }
-    if (!initialized) {
+    if (ShouldFixCursor() && !initialized) {
         CursorFixEnable(settings.enable_cursor_fix);
-        initialized = true;
     }
-    CursorFixWndProc(Message, wParam, lParam);
     return false;
 }

@@ -16,3 +16,14 @@
 - Keep decoded names free of markup after changing the game text language.
 - Fix collapsed Objective Timer runs disappearing and restore the visibility of saved run history.
 - Save Objective Timer snapshots in the background, merge history across sessions and clients, and safely finish pending writes during shutdown.
+
+## v4 - 2026-09-08
+- Fix the Add Teambuild crash caused by delayed skill-name decoding writing to a deleted build, while preserving automatic profession and elite-skill labels.
+- Preserve normal camera sensitivity with the cursor fix enabled and reject stale cursor-warp movement.
+- Validate raw mouse input, correct cursor mask caching, and clean up cursor hooks and pending redraws when unloading Mouse Settings.
+- Allow chat commands and hotkeys to run while Guild Wars is in the background, and recover hotkey readiness after early injection, settings reloads, and map changes.
+- Refresh GWCA's key-input frame and defer key release to the next game loop so skill requests survive UI recreation and queued input processing.
+
+## v5 - 2026-09-11
+- Publish the latest teambuild and cursor fixes under a new launcher update revision.
+- Include hotkey startup recovery, background hotkey and chat-command support, and the skill-input compatibility fixes.

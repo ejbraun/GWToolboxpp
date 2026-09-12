@@ -24,7 +24,6 @@
 #include <GWCA/Managers/MapMgr.h>
 #include <GWCA/Managers/StoCMgr.h>
 #include <GWCA/Managers/ChatMgr.h>
-#include <GWCA/Managers/MemoryMgr.h>
 #include <GWCA/Managers/GameThreadMgr.h>
 #include <GWCA/Managers/SkillbarMgr.h>
 #include <GWCA/Managers/UIMgr.h>
@@ -1181,7 +1180,7 @@ void SpeedrunScriptingTools::Update(float delta)
 
 bool SpeedrunScriptingTools::WndProc(const UINT Message, const WPARAM wParam, LPARAM lparam)
 {
-    if (GW::Chat::GetIsTyping() || GW::MemoryMgr::GetGWWindowHandle() != GetActiveWindow()) 
+    if (GW::Chat::GetIsTyping())
     {
         return false;
     }

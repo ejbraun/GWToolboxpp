@@ -20,3 +20,10 @@
 - Fix Pits and Souls staying Unknown when Chained Soul health is available through map-agent data or its position differs from the old 50-unit gate.
 - Track Chained Soul spawn/death events and preserve countdown progress when cached health stops changing, souls leave range or frames are delayed.
 - Reset and synchronize Pits and Souls tracking across map changes and feature unload, and distinguish missing souls from missing health in the window.
+- Make SST skill actions validate their skillbar and dispatch result, wait for cast evidence, and stop with an error on interruption or timeout instead of silently advancing to NPC interactions.
+- Allow SST keyboard triggers to process input delivered to Guild Wars while its window is in the background.
+- Fix SST instance-progress conditions dereferencing missing or stale game data by tracking mission-progress packets, and guard skill-readiness checks when skill metadata is unavailable.
+
+## v6 - 2026-09-11
+- Publish updated SST skill-cast handling and background keyboard triggers under a new launcher update revision.
+- Fix SST progress conditions reading missing or stale game memory by tracking mission-progress packets, and guard unavailable skill metadata.

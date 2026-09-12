@@ -8,6 +8,14 @@ Enable **SpeedrunScriptingTools** inside [DBBox](/docs/plugins/) to configure sc
 
 Dialogue triggers match decoded text without Guild Wars formatting tags. Item, agent, skill and quest names supplied by the scripting helpers also use plain decoded text.
 
+## Use Skill actions
+
+**Use skill** supports a SkillID or a skillbar slot. Both forms wait for the game's cast-completion notification before advancing to the next action. Instant skills also need this confirmation. This keeps a sequence such as Target NPC → Use Skill → Talk with NPC → Send Dialog from treating a failed cast as successful.
+
+Rejected or interrupted casts stop the affected script and appear in its log. A cast that never starts or finishes times out after 5–30 seconds, depending on its normal casting time. Loading another script or changing maps cancels any pending skill request. Missing skillbars and invalid slots fail safely.
+
+Use the updated Toolbox DLL together with DBBox: Toolbox's compatibility fixes refresh the game input frame and release simulated keys on the following game loop.
+
 ## Loading screens and action failures
 
 Actions pause during loading screens. Map changes clear the old running actions and trigger state; instance-load scripts resume after the new map and player are ready. Fork revision 3 fixes a loading-state race that could leave scripting paused until another map change.

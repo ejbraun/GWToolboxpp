@@ -26,6 +26,7 @@ public:
     void SaveSettings(SettingsDoc& doc) override;
     void Initialize() override;
     void Terminate() override;
+    void Update(float) override;
     bool WndProc(UINT, WPARAM, LPARAM) override;
     void DrawSettingsInternal() override;
 };

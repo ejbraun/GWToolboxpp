@@ -237,7 +237,7 @@ bool TBHotkey::IsValid(const char* _player_name, const GW::Constants::InstanceTy
 
 bool TBHotkey::CanUse()
 {
-    return !isLoading() && !GW::Map::GetIsObserving() && GW::Agents::GetControlledCharacter() && GW::MemoryMgr::GetGWWindowHandle() == GetActiveWindow() && IsInRangeOfNPC();
+    return !isLoading() && !GW::Map::GetIsObserving() && GW::Agents::GetControlledCharacter() && IsInRangeOfNPC();
 }
 
 void TBHotkey::Save(ToolboxIni* ini, const char* section) const

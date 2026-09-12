@@ -82,39 +82,45 @@ private:
     ReferenceFrame refFrame = ReferenceFrame::Camera;
 };
 
-class CastAction : public Action {
+class SkillCastAction : public Action {
+public:
+    ~SkillCastAction() override;
+    void initialAction() override;
+    void finalAction() override;
+    ActionStatus isComplete() const override;
+
+protected:
+    void beginCast(size_t slot);
+
+private:
+    struct CastState;
+    std::shared_ptr<CastState> castState;
+};
+
+class CastAction : public SkillCastAction {
 public:
     CastAction() = default;
     CastAction(InputStream&);
     ActionType type() const final { return ActionType::Cast; }
     void initialAction() final;
-    ActionStatus isComplete() const final;
     void drawSettings() final;
     void serialize(OutputStream&) const final;
 
 private:
     GW::Constants::SkillID id = GW::Constants::SkillID::No_Skill;
-    bool hasSkillReady = false;
-    std::chrono::steady_clock::time_point startTime = std::chrono::steady_clock::now();
-    mutable bool hasBegunCasting = false;
 };
 
-class CastBySlotAction : public Action {
+class CastBySlotAction : public SkillCastAction {
 public:
     CastBySlotAction() = default;
     CastBySlotAction(InputStream&);
     ActionType type() const final { return ActionType::CastBySlot; }
     void initialAction() final;
-    ActionStatus isComplete() const final;
     void drawSettings() final;
     void serialize(OutputStream&) const final;
 
 private:
     int slot = 1;
-    bool hasSkillReady = false;
-    GW::Constants::SkillID id = GW::Constants::SkillID::No_Skill;
-    std::chrono::steady_clock::time_point startTime = std::chrono::steady_clock::now();
-    mutable bool hasBegunCasting = false;
 };
 
 class ChangeTargetAction : public Action 

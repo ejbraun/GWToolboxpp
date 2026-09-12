@@ -307,6 +307,38 @@ const std::string& Build::GetFallbackBuildName()
     return fallback_name_;
 }
 
+bool Build::UpdateNameFromTemplate(const bool initialize)
+{
+    if (initialize) pending_name_ = PendingName{code, name};
+    if (!pending_name_) return false;
+    if (code != pending_name_->code || name != pending_name_->name) {
+        pending_name_.reset();
+        return false;
+    }
+    const auto decoded = Decode();
+    if (!decoded) {
+        pending_name_.reset();
+        return false;
+    }
+
+    const auto primary = ToolboxUtils::GetProfessionAcronym(decoded->primary);
+    const auto secondary = ToolboxUtils::GetProfessionAcronym(decoded->secondary);
+    auto generated_name = std::format("{}/{}", primary->string(), secondary->string());
+    const auto& elite_name = GetFallbackBuildName();
+    if (!elite_name.empty()) generated_name += std::format(" - {}", elite_name);
+
+    const auto changed = name != generated_name;
+    name = std::move(generated_name);
+    if (primary->IsDecoding() || secondary->IsDecoding()
+        || (fallback_elite_skill_ != GW::Constants::SkillID::No_Skill && Resources::GetSkillName(fallback_elite_skill_)->IsDecoding())) {
+        pending_name_->name = name;
+    }
+    else {
+        pending_name_.reset();
+    }
+    return changed;
+}
+
 GW::SkillbarMgr::SkillTemplate* Build::Decode()
 {
     if (!decode_attempted_) {

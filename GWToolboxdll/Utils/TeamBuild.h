@@ -33,6 +33,9 @@ struct Build {
     // Returns the elite skill name from the build code as a fallback display name.
     const std::string& GetFallbackBuildName();
 
+    // Name decoding can finish after a build is copied, moved, or removed.
+    bool UpdateNameFromTemplate(bool initialize = false);
+
     // Decode skill template from code. Returns nullptr if code is invalid.
     GW::SkillbarMgr::SkillTemplate* Decode();
     bool IsDecoded() const;
@@ -56,6 +59,12 @@ struct Build {
 
 private:
     GW::SkillbarMgr::SkillTemplate skill_template_{};
+
+    struct PendingName {
+        std::string code;
+        std::string name;
+    };
+    std::optional<PendingName> pending_name_{};
 
     std::string fallback_name_{};
     std::string fallback_src_code_{};

@@ -39,6 +39,9 @@ namespace {
     bool clickerActive = false;   // clicker is active or not
     bool dropCoinsActive = false; // coin dropper is active or not
     bool map_change_triggered = false;
+    bool valid_hotkeys_ready = false;
+    clock_t last_map_check = 0;
+    GW::HookEntry map_loaded_hook;
 
     clock_t clickerTimer = 0;   // timer for clicker
     clock_t dropCoinsTimer = 0; // timer for coin dropper
@@ -112,8 +115,24 @@ namespace {
         return hk;
     }
 
+    void ResetMapHotkeys()
+    {
+        const std::scoped_lock lock(hotkeys_mutex);
+        map_change_triggered = false;
+        valid_hotkeys_ready = false;
+        last_map_check = 0;
+        valid_hotkeys.clear();
+        pending_hotkeys.clear(); // Clear any pending hotkeys from the last map
+        keys_currently_held.reset();
+        wndproc_keys_held.reset();
+        for (const auto hk : TBHotkey::all_hotkeys) {
+            hk->pressed = false;
+        }
+    }
+
     void DeleteHotkeys()
     {
+        valid_hotkeys_ready = false;
         valid_hotkeys.clear();
         pending_hotkeys.clear();
         current_hotkey = nullptr;
@@ -192,13 +211,14 @@ namespace {
     bool CheckSetValidHotkeys()
     {
         const std::scoped_lock lock(hotkeys_mutex);
+        valid_hotkeys_ready = false;
         valid_hotkeys.clear();
         const auto c = GW::GetCharContext();
-        if (!c) {
+        if (!c || !c->player_name[0]) {
             return false;
         }
         GW::Player* me = GW::PlayerMgr::GetPlayerByID(c->player_number);
-        if (!me) {
+        if (!me || !me->primary || me->primary > std::to_underlying(GW::Constants::Profession::Dervish)) {
             return false;
         }
         const std::string player_name = TextUtils::WStringToString(c->player_name);
@@ -210,12 +230,13 @@ namespace {
             AddHotkeyIfValid(hotkey, player_name.c_str(), instance_type, primary, map_id, is_pvp, valid_hotkeys);
         }
 
+        valid_hotkeys_ready = true;
         return true;
     }
 
     bool OnMapChanged()
     {
-        if (!IsMapReady()) {
+        if (!GW::Map::GetIsMapLoaded() || GW::Map::GetIsObserving()) {
             return false;
         }
         if (!GW::Agents::GetControlledCharacter()) {
@@ -226,6 +247,10 @@ namespace {
             return false;
         }
         if (!CheckSetValidHotkeys()) {
+            return false;
+        }
+        // Equipment rendering can lag behind input readiness; only automatic map-entry actions need to wait.
+        if (!IsMapReady()) {
             return false;
         }
         bool is_in_controller_mode = GW::UI::IsInControllerMode();
@@ -361,6 +386,9 @@ void HotkeysWindow::Initialize()
 {
     ToolboxWindow::Initialize();
     SettingsRegistry::Register(this, settings);
+    ResetMapHotkeys();
+    GW::UI::RegisterUIMessageCallback(&map_loaded_hook, GW::UI::UIMessage::kMapLoaded,
+        [](GW::HookStatus*, GW::UI::UIMessage, void*, void*) { ResetMapHotkeys(); }, 0x8000);
     clickerTimer = TIMER_INIT();
     dropCoinsTimer = TIMER_INIT();
 }
@@ -373,6 +401,7 @@ const TBHotkey* HotkeysWindow::CurrentHotkey()
 
 void HotkeysWindow::Terminate()
 {
+    GW::UI::RemoveUIMessageCallback(&map_loaded_hook);
     {
         const std::scoped_lock lock(hotkeys_mutex);
         ToolboxWindow::Terminate();
@@ -629,7 +658,7 @@ bool HotkeysWindow::WndProc(const UINT Message, const WPARAM wParam, LPARAM)
         OnWindowActivated(LOWORD(wParam) != WA_INACTIVE);
         return false;
     }
-    if (GW::MemoryMgr::GetGWWindowHandle() != GetActiveWindow() || GW::Chat::GetIsTyping()) {
+    if (GW::Chat::GetIsTyping()) {
         wndproc_keys_held.reset();
         return false;
     }
@@ -717,20 +746,20 @@ void HotkeysWindow::Update(const float)
 {
     const std::scoped_lock lock(hotkeys_mutex);
     if (GW::Map::GetInstanceType() == GW::Constants::InstanceType::Loading) {
-        if (map_change_triggered) {
-            map_change_triggered = false;
-            while (PopPendingHotkey()) {} // Clear any pending hotkeys from the last map
-            for (auto hk : TBHotkey::all_hotkeys) {
-                hk->pressed = false;
-            }
+        if (map_change_triggered || !valid_hotkeys.empty() || !pending_hotkeys.empty()) {
+            ResetMapHotkeys();
         }
         return;
     }
-    if (!map_change_triggered) {
-        static clock_t last_map_check = 0;
+    if (!map_change_triggered || !valid_hotkeys_ready) {
         if (!last_map_check || TIMER_DIFF(last_map_check) > 500) {
             last_map_check = TIMER_INIT();
-            map_change_triggered = OnMapChanged();
+            if (!map_change_triggered) {
+                map_change_triggered = OnMapChanged();
+            }
+            else {
+                CheckSetValidHotkeys();
+            }
         }
     }
     for (auto hotkey : TBHotkey::all_hotkeys) {

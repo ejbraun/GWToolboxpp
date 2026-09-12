@@ -34,6 +34,7 @@
 
 #include <ImGuiCppWrapper.h>
 #include <thread>
+#include <atomic>
 #include <span>
 #include <numbers>
 
@@ -455,6 +456,109 @@ void MoveInchwiseAction::drawSettings()
     ImGui::PopID();
 }
 
+struct SkillCastAction::CastState {
+    enum class Dispatch { Pending, Dispatching, Accepted, Rejected };
+    GW::HookEntry hook;
+    GW::Constants::SkillID skillId = GW::Constants::SkillID::No_Skill;
+    uint32_t agentId = 0;
+    size_t slot = 0;
+    std::chrono::steady_clock::time_point startedAt = std::chrono::steady_clock::now();
+    std::chrono::duration<float> timeout{5.f};
+    std::atomic_bool active = true;
+    std::atomic<Dispatch> dispatch = Dispatch::Pending;
+    std::atomic<ActionStatus> result = ActionStatus::Running;
+};
+
+SkillCastAction::~SkillCastAction()
+{
+    finalAction();
+}
+
+void SkillCastAction::initialAction()
+{
+    finalAction();
+    Action::initialAction();
+}
+
+void SkillCastAction::finalAction()
+{
+    if (castState) {
+        castState->active = false;
+        GW::UI::RemoveUIMessageCallback(&castState->hook);
+        castState.reset();
+    }
+    Action::finalAction();
+}
+
+void SkillCastAction::beginCast(const size_t slot)
+{
+    const auto player = GW::Agents::GetControlledCharacter();
+    const auto bar = GW::SkillbarMgr::GetPlayerSkillbar();
+    if (!player || !bar || !bar->IsValid() || slot >= std::size(bar->skills) || bar->agent_id != player->agent_id) return;
+    const auto& skill = bar->skills[slot];
+    const auto data = GW::SkillbarMgr::GetSkillConstantData(skill.skill_id);
+    if (skill.skill_id == GW::Constants::SkillID::No_Skill || skill.GetRecharge() || !data) return;
+    if (!std::isfinite(data->activation) || !std::isfinite(data->aftercast)) return;
+
+    const auto state = castState = std::make_shared<CastState>();
+    state->skillId = skill.skill_id;
+    state->agentId = player->agent_id;
+    state->slot = slot;
+    state->timeout = std::chrono::duration<float>{std::clamp(3.f + 2.f * (data->activation + data->aftercast), 5.f, 30.f)};
+
+    // Skill Monitor uses these completion events too; polling player->skill can miss a short cast entirely.
+    for (const auto message : {GW::UI::UIMessage::kAgentSkillActivated, GW::UI::UIMessage::kAgentSkillActivatedInstantly, GW::UI::UIMessage::kAgentSkillCancelled}) {
+        GW::UI::RegisterUIMessageCallback(&state->hook, message,
+            [state](GW::HookStatus*, const GW::UI::UIMessage message, void* wparam, void*) {
+                const auto packet = static_cast<GW::UI::UIPacket::kAgentSkillPacket*>(wparam);
+                if (!state->active || state->dispatch == CastState::Dispatch::Pending || !packet
+                    || packet->agent_id != state->agentId || packet->skill_id != state->skillId) return;
+                auto expected = ActionStatus::Running;
+                state->result.compare_exchange_strong(expected,
+                    message == GW::UI::UIMessage::kAgentSkillCancelled ? ActionStatus::Error : ActionStatus::Complete);
+            }, 0x8000);
+    }
+
+    const auto target = GW::Agents::GetTargetAsAgentLiving();
+    // Script replacement can cancel a queued request; keep its state alive without capturing the action itself.
+    GW::GameThread::Enqueue([state, targetId = target ? target->agent_id : 0] {
+        if (!state->active) return;
+        const auto player = GW::Agents::GetControlledCharacter();
+        const auto bar = GW::SkillbarMgr::GetPlayerSkillbar();
+        if (!player || player->agent_id != state->agentId || !bar || !bar->IsValid() || bar->agent_id != state->agentId
+            || bar->skills[state->slot].skill_id != state->skillId || bar->skills[state->slot].GetRecharge()) {
+            state->dispatch = CastState::Dispatch::Rejected;
+            return;
+        }
+        state->dispatch = CastState::Dispatch::Dispatching;
+        state->dispatch = GW::SkillbarMgr::UseSkill(static_cast<uint32_t>(state->slot), targetId)
+            ? CastState::Dispatch::Accepted : CastState::Dispatch::Rejected;
+    });
+}
+
+ActionStatus SkillCastAction::isComplete() const
+{
+    const auto state = castState;
+    if (!state || !state->active) return ActionStatus::Error;
+    if (state->dispatch == CastState::Dispatch::Rejected || state->result == ActionStatus::Error) {
+        logMessage(std::format("Use skill {} was rejected or interrupted.", static_cast<uint32_t>(state->skillId)));
+        return ActionStatus::Error;
+    }
+    if (state->dispatch == CastState::Dispatch::Accepted && state->result == ActionStatus::Complete) return ActionStatus::Complete;
+    if (std::chrono::steady_clock::now() - state->startedAt >= state->timeout) {
+        logMessage(std::format("Use skill {} timed out waiting for the game to cast it.", static_cast<uint32_t>(state->skillId)));
+        return ActionStatus::Error;
+    }
+    if (state->dispatch != CastState::Dispatch::Accepted) return ActionStatus::Running;
+
+    const auto player = GW::Agents::GetControlledCharacter();
+    const auto bar = GW::SkillbarMgr::GetPlayerSkillbar();
+    if (!player || player->agent_id != state->agentId || !bar || !bar->IsValid() || bar->agent_id != state->agentId
+        || bar->skills[state->slot].skill_id != state->skillId) return ActionStatus::Error;
+
+    return ActionStatus::Running;
+}
+
 /// ------------- CastAction -------------
 CastAction::CastAction(InputStream& stream)
 {
@@ -468,42 +572,12 @@ void CastAction::serialize(OutputStream& stream) const
 }
 void CastAction::initialAction()
 {
-    Action::initialAction();
-
-    startTime = std::chrono::steady_clock::now();
-    hasBegunCasting = false;
-    hasSkillReady = false;
-
-    const auto skills = std::span<GW::SkillbarSkill>{GW::SkillbarMgr::GetPlayerSkillbar()->skills};
-    const auto skillIt = std::ranges::find_if(skills, [&](const auto& s) { return s.skill_id == id && s.GetRecharge() == 0; });
-    if (skillIt == skills.end()) {
-        hasSkillReady = false;
-        return;
-    }
-    hasSkillReady = true;
-
-    const auto target = GW::Agents::GetTargetAsAgentLiving();
-    GW::GameThread::Enqueue([slot = skillIt - skills.begin(), targetId = target ? target->agent_id : 0]() -> void {
-        GW::SkillbarMgr::UseSkill(slot, targetId);
-    });
-}
-ActionStatus CastAction::isComplete() const
-{
-    if (!hasSkillReady || id == GW::Constants::SkillID::No_Skill) return ActionStatus::Error;
-
-    const auto player = GW::Agents::GetControlledCharacter();
-    if (!player) return ActionStatus::Error;
-
-    const auto skillData = GW::SkillbarMgr::GetSkillConstantData(id);
-    if (!skillData) return ActionStatus::Error;
-    if (skillData->activation == 0.f) return ActionStatus::Complete;
-
-    hasBegunCasting |= (static_cast<GW::Constants::SkillID>(player->skill) == id);
-
-    const auto elapsedTime = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startTime).count();
-    if (elapsedTime > 2000 * (skillData->activation + skillData->aftercast)) return ActionStatus::Complete;
-
-    return (hasBegunCasting && static_cast<GW::Constants::SkillID>(player->skill) != id) ? ActionStatus::Complete : ActionStatus::Running;
+    SkillCastAction::initialAction();
+    const auto bar = GW::SkillbarMgr::GetPlayerSkillbar();
+    if (!bar || !bar->IsValid() || id == GW::Constants::SkillID::No_Skill) return;
+    const auto skills = std::span<GW::SkillbarSkill>{bar->skills};
+    const auto skill = std::ranges::find_if(skills, [&](const auto& s) { return s.skill_id == id && s.GetRecharge() == 0; });
+    if (skill != skills.end()) beginCast(static_cast<size_t>(skill - skills.begin()));
 }
 void CastAction::drawSettings()
 {
@@ -529,39 +603,9 @@ void CastBySlotAction::serialize(OutputStream& stream) const
 }
 void CastBySlotAction::initialAction()
 {
-    Action::initialAction();
-    hasBegunCasting = false;
-    startTime = std::chrono::steady_clock::now();
-
-    const auto bar = GW::SkillbarMgr::GetPlayerSkillbar();
-    if (!bar || !bar->IsValid()) return;
-
-    hasSkillReady = bar->skills[slot - 1].GetRecharge() == 0;
-    id = bar->skills[slot - 1].skill_id;
-    if (!hasSkillReady) return;
-
-    const auto target = GW::Agents::GetTargetAsAgentLiving();
-    GW::GameThread::Enqueue([skillSlot = slot, targetId = target ? target->agent_id : 0]() -> void {
-        GW::SkillbarMgr::UseSkill(skillSlot - 1, targetId);
-    });
-}
-ActionStatus CastBySlotAction::isComplete() const
-{
-    if (!hasSkillReady || id == GW::Constants::SkillID::No_Skill) return ActionStatus::Error;
-
-    const auto player = GW::Agents::GetControlledCharacter();
-    if (!player) return ActionStatus::Error;
-
-    const auto skillData = GW::SkillbarMgr::GetSkillConstantData(id);
-    if (!skillData) return ActionStatus::Error;
-    if (skillData->activation == 0.f) return ActionStatus::Complete;
-
-    hasBegunCasting |= (static_cast<GW::Constants::SkillID>(player->skill) == id);
-
-    const auto elapsedTime = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startTime).count();
-    if (elapsedTime > 2000 * (skillData->activation+skillData->aftercast)) return ActionStatus::Complete;
-
-    return (hasBegunCasting && static_cast<GW::Constants::SkillID>(player->skill) != id) ? ActionStatus::Complete : ActionStatus::Running;
+    SkillCastAction::initialAction();
+    if (slot < 1 || slot > 8) return;
+    beginCast(static_cast<size_t>(slot - 1));
 }
 void CastBySlotAction::drawSettings()
 {

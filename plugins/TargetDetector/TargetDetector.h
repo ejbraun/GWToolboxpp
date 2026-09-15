@@ -114,6 +114,7 @@ private:
     void TriggerZone(size_t index, const std::vector<uint32_t>& targets);
     void ExecuteActions(const Zone& zone, const std::vector<uint32_t>& targets);
     void ProcessPendingMarks();
+    void RestoreMarkedTarget();
     void RebuildTerrainPreview();
     [[nodiscard]] size_t TerrainSignature() const;
     [[nodiscard]] std::vector<uint32_t> MatchingTargets(const Zone& zone) const;

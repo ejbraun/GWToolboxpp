@@ -234,8 +234,8 @@ void TargetDetector::SignalTerminate()
     RenderingUtils::clearDrawingList(this);
     terrain_preview_present_ = false;
     terrain_signature_valid_ = false;
-    if (!pending_marks_.empty() && mark_restore_pending_) {
-        GW::Agents::ChangeTarget(mark_restore_target_);
+    if (!pending_marks_.empty()) {
+        RestoreMarkedTarget();
     }
     pending_marks_.clear();
     aggro_ = {};
@@ -471,6 +471,17 @@ void TargetDetector::ExecuteActions(const Zone& zone, const std::vector<uint32_t
     }
 }
 
+void TargetDetector::RestoreMarkedTarget()
+{
+    if (!mark_restore_pending_) return;
+    const auto target = mark_restore_target_;
+    mark_restore_target_ = 0;
+    mark_restore_pending_ = false;
+    if (GW::Map::GetInstanceType() == GW::Constants::InstanceType::Loading) return;
+    // The original target may despawn while the marking queue is running.
+    GW::Agents::ChangeTarget(target && GW::Agents::GetAgentByID(target) ? target : 0u);
+}
+
 void TargetDetector::ProcessPendingMarks()
 {
     if (pending_marks_.empty()) {
@@ -480,10 +491,8 @@ void TargetDetector::ProcessPendingMarks()
         pending_marks_.pop_front();
         mark_target_selected_at_.reset();
         mark_attempts_ = 0;
-        if (pending_marks_.empty() && mark_restore_pending_) {
-            GW::Agents::ChangeTarget(mark_restore_target_);
-            mark_restore_target_ = 0;
-            mark_restore_pending_ = false;
+        if (pending_marks_.empty()) {
+            RestoreMarkedTarget();
         }
     };
     const auto target = pending_marks_.front();
@@ -841,7 +850,7 @@ void TargetDetector::DrawSettings()
     ImGui::Checkbox("Minimap rotates with camera", &minimap_rotation_enabled_);
     if (ImGui::Button("Clear Current Marks")) {
         GW::Chat::SendChat('/', "marktarget clearall");
-        if (mark_restore_pending_) GW::Agents::ChangeTarget(mark_restore_target_);
+        RestoreMarkedTarget();
         pending_marks_.clear();
         mark_target_selected_at_.reset();
         mark_restore_target_ = 0;

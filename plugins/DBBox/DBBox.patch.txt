@@ -27,6 +27,8 @@
 ## v6 - 2026-09-11
 - Publish updated SST skill-cast handling and background keyboard triggers under a new launcher update revision.
 - Fix SST progress conditions reading missing or stale game memory by tracking mission-progress packets, and guard unavailable skill metadata.
+
+## v7 - 2026-09-14
 - Fix TargetDetector restoring a despawned target after marking finishes, marks are cleared, or the feature unloads.
 - Fix Skin Changer applying overrides after the visual refresh, handle items already loaded and live settings changes, and restore original item appearances on removal or unload.
 - Fix minipet transmog scale, NPC-slot collisions and missed or rejected item-use attempts.

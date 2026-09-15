@@ -1027,10 +1027,8 @@ void SkinChanger::Initialize(ImGuiContext* ctx, ImGuiAllocFns allocator_fns, HMO
     constexpr char notifyMask[] = "xxxxxxxxxxxxxxxx????xxxxxxxxxxxxxxxxxxxx????xxx????xxxxxxxx";
     static_assert(sizeof(notifyPattern) == sizeof(notifyMask));
     const auto notifyAddress = GW::Scanner::Find(notifyPattern, notifyMask);
-    auto textEnd = uintptr_t{0};
-    GW::Scanner::GetSectionAddressRange(GW::ScannerSection::Section_TEXT, nullptr, &textEnd);
-    const auto duplicate = notifyAddress
-        ? GW::Scanner::FindInRange(notifyPattern, notifyMask, 0, notifyAddress + 1, textEnd) : 0;
+    // GetSectionAddressRange returns file-mapped bounds; FindNth keeps both bounds in runtime address space.
+    const auto duplicate = notifyAddress ? GW::Scanner::FindNth(notifyPattern, notifyMask, 1) : 0;
     NotifyItemChanged = notifyAddress && !duplicate ? reinterpret_cast<NotifyItemChanged_pt>(notifyAddress) : nullptr;
     if (!NotifyItemChanged) {
         logMessage("Live appearance refresh is unavailable; skins will apply on the next game item update.", Name());

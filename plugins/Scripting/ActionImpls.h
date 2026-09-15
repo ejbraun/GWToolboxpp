@@ -24,7 +24,23 @@
 extern std::map<uint32_t, std::vector<bool*>> gotoTargetDialogPoppedUp;
 extern std::map<uint32_t, std::vector<bool*>> repopMinipets;
 
-class MoveToAction : public Action {
+class MovementAction : public Action {
+public:
+    ~MovementAction() override;
+    void initialAction() override;
+    void finalAction() override;
+
+protected:
+    void beginMove(GW::GamePos destination);
+    ActionStatus movementStatus(float accuracy) const;
+
+private:
+    struct MoveState;
+    std::shared_ptr<MoveState> moveState;
+    static void queueMove(const std::shared_ptr<MoveState>& state);
+};
+
+class MoveToAction : public MovementAction {
 public:
     MoveToAction();
     MoveToAction(InputStream&);
@@ -43,7 +59,7 @@ private:
     mutable bool hasBegunWalking = false;
 };
 
-class MoveToTargetPositionAction : public Action {
+class MoveToTargetPositionAction : public MovementAction {
 public:
     MoveToTargetPositionAction() = default;
     MoveToTargetPositionAction(InputStream&);
@@ -414,7 +430,7 @@ public:
     StopScriptAction() = default;
     StopScriptAction(InputStream&){}
     ActionType type() const final { return ActionType::StopScript; }
-    ActionStatus isComplete() const final { return ActionStatus::Error; }
+    ActionStatus isComplete() const final { return ActionStatus::Stopped; }
     void drawSettings() final;
     ActionBehaviourFlags behaviour() const final { return ActionBehaviourFlag::CanBeRunInOutpost; }
 };

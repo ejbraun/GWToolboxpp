@@ -33,3 +33,6 @@
 - Preserve the active keyboard layout during startup layout detection, reuse an already installed en-US layout, and validate the native layout address before accessing it.
 - Correct saved extended spirit-range compass circles from the old 3500 default to 3000 once per config, preserving custom radii and display settings.
 - Fix release tags being generated without a version; launcher manifests continue to use the integer fork revision.
+
+## v7 - 2026-09-15
+- Fix extra spaces and other unwanted characters in Guild Wars chat when the Mouse Settings cursor fix is enabled.

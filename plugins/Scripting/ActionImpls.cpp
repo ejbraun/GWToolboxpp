@@ -44,6 +44,23 @@ namespace {
     constexpr float indent = 25.f;
     constexpr double eps = 1e-3;
 
+    std::chrono::milliseconds ReadActionPing()
+    {
+        struct LatencyFrameContext {
+            uint8_t unused[0x20];
+            uint32_t averagePing;
+            uint32_t unused24;
+            uint32_t currentPing;
+        };
+        static_assert(sizeof(LatencyFrameContext) == 0x2c);
+        // Match LatencyWidget's DnStat context, resolving it again because frames can be recreated.
+        const auto frame = GW::UI::GetFrameByLabel(L"DnStat");
+        const auto context = frame && frame->IsCreated() && !frame->IsBeingDestroyed()
+            ? static_cast<const LatencyFrameContext*>(GW::UI::GetFrameContext(frame)) : nullptr;
+        const auto measured = context ? std::max(context->currentPing, context->averagePing) : 0;
+        return std::chrono::milliseconds{std::clamp(measured ? measured : 250u, 50u, 5000u)};
+    }
+
     GW::Constants::Bag toGwcaBag(Bag bag)
     {
         switch (bag) {
@@ -216,6 +233,116 @@ namespace {
     }
 } // namespace
 
+struct MovementAction::MoveState {
+    enum class Dispatch { Pending, Accepted, Rejected };
+    GW::GamePos destination{}, origin{};
+    uint32_t agentId = 0;
+    bool wasMoving = false;
+    unsigned attempts = 0;
+    std::chrono::steady_clock::time_point queuedAt{}, firstDispatchAt{}, nextCheckAt{};
+    std::chrono::milliseconds ping{0}, retryInterval{250};
+    std::atomic_bool active = true;
+    std::atomic<Dispatch> dispatch = Dispatch::Pending;
+};
+
+MovementAction::~MovementAction()
+{
+    finalAction();
+}
+
+void MovementAction::initialAction()
+{
+    finalAction();
+    Action::initialAction();
+}
+
+void MovementAction::finalAction()
+{
+    if (moveState) {
+        moveState->active = false;
+        moveState.reset();
+    }
+    Action::finalAction();
+}
+
+void MovementAction::beginMove(const GW::GamePos destination)
+{
+    const auto player = GW::Agents::GetControlledCharacter();
+    if (!player || player->GetIsDead() || !std::isfinite(destination.x) || !std::isfinite(destination.y)) return;
+
+    const auto state = moveState = std::make_shared<MoveState>();
+    state->agentId = player->agent_id;
+    state->destination = destination;
+    queueMove(state);
+}
+
+void MovementAction::queueMove(const std::shared_ptr<MoveState>& state)
+{
+    state->queuedAt = std::chrono::steady_clock::now();
+    state->dispatch = MoveState::Dispatch::Pending;
+    // Queued retries must not outlive a cleared script or its movement action.
+    GW::GameThread::Enqueue([state] {
+        if (!state->active) return;
+        const auto player = GW::Agents::GetControlledCharacter();
+        if (!player || player->agent_id != state->agentId || player->GetIsDead()
+            || GW::Map::GetInstanceType() == GW::Constants::InstanceType::Loading) {
+            state->dispatch = MoveState::Dispatch::Rejected;
+            return;
+        }
+        if (state->attempts && player->GetIsMoving()) {
+            state->dispatch = MoveState::Dispatch::Accepted;
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (!state->attempts++) {
+            state->firstDispatchAt = now;
+            state->origin = player->pos;
+            state->wasMoving = player->GetIsMoving();
+            state->ping = state->retryInterval = ReadActionPing();
+        }
+        state->nextCheckAt = now + state->retryInterval;
+        state->dispatch = GW::Agents::Move(state->destination) ? MoveState::Dispatch::Accepted : MoveState::Dispatch::Rejected;
+    });
+}
+
+ActionStatus MovementAction::movementStatus(const float accuracy) const
+{
+    const auto state = moveState;
+    if (!state || !state->active) return ActionStatus::Error;
+    const auto dispatch = state->dispatch.load();
+    if (dispatch == MoveState::Dispatch::Rejected) {
+        logMessage("Move request was rejected.");
+        return ActionStatus::Error;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (dispatch == MoveState::Dispatch::Pending) {
+        const auto startedAt = state->attempts ? state->firstDispatchAt : state->queuedAt;
+        const auto timeout = state->attempts ? std::max(std::chrono::milliseconds{1000}, 4 * state->ping) : std::chrono::milliseconds{30000};
+        if (now - startedAt < timeout) return ActionStatus::Running;
+        logMessage("Move timed out before a queued request was dispatched.");
+        return ActionStatus::Error;
+    }
+    const auto player = GW::Agents::GetControlledCharacter();
+    if (!player || player->agent_id != state->agentId || player->GetIsDead()) return ActionStatus::Error;
+    const auto moving = player->GetIsMoving();
+    if (GW::GetDistance(player->pos, state->destination) <= std::max(accuracy, 1.f)
+        || (moving && (!state->wasMoving || GW::GetDistance(player->pos, state->origin) > 1.f))) {
+        return ActionStatus::Complete;
+    }
+    if (now < state->nextCheckAt) return ActionStatus::Running;
+    const auto ping = ReadActionPing();
+    state->ping = std::max(state->ping, ping);
+    state->nextCheckAt = now + ping;
+    if (now - state->firstDispatchAt >= std::max(std::chrono::milliseconds{1000}, 4 * state->ping)) {
+        logMessage(std::format("Move to ({:.1f}, {:.1f}) timed out waiting for movement to start (ping allowance: {} ms).",
+            state->destination.x, state->destination.y, state->ping.count()));
+        return ActionStatus::Error;
+    }
+    state->retryInterval = ping;
+    if (!moving) queueMove(state);
+    return ActionStatus::Running;
+}
+
 /// ------------- MoveToAction -------------
 MoveToAction::MoveToAction()
 {
@@ -236,17 +363,21 @@ void MoveToAction::serialize(OutputStream& stream) const
 }
 void MoveToAction::initialAction()
 {
-    Action::initialAction();
+    MovementAction::initialAction();
 
     hasBegunWalking = false;
 
+    if (moveBehaviour == MoveToBehaviour::ImmediateFinish) {
+        beginMove(pos);
+        return;
+    }
     GW::GameThread::Enqueue([pos = this->pos]() -> void {
         GW::Agents::Move(pos);
     });
 }
 ActionStatus MoveToAction::isComplete() const
 {
-    if (moveBehaviour == MoveToBehaviour::ImmediateFinish) return ActionStatus::Complete;
+    if (moveBehaviour == MoveToBehaviour::ImmediateFinish) return movementStatus(accuracy);
 
     const auto player = GW::Agents::GetControlledCharacter();
     if (!player) return ActionStatus::Error;
@@ -315,7 +446,7 @@ void MoveToTargetPositionAction::serialize(OutputStream& stream) const
 }
 void MoveToTargetPositionAction::initialAction()
 {
-    Action::initialAction();
+    MovementAction::initialAction();
 
     hasBegunWalking = false;
     const auto player = GW::Agents::GetControlledCharacter();
@@ -328,6 +459,10 @@ void MoveToTargetPositionAction::initialAction()
         const auto direction = GW::Normalize(pos - player->pos);
         pos = pos - direction * targetDistance;
     }
+    if (moveBehaviour == MoveToBehaviour::ImmediateFinish) {
+        beginMove(pos);
+        return;
+    }
     GW::GameThread::Enqueue([pos = this->pos]() -> void {
         GW::Agents::Move(pos);
     });
@@ -335,7 +470,7 @@ void MoveToTargetPositionAction::initialAction()
 ActionStatus MoveToTargetPositionAction::isComplete() const
 {
     if (!hasTarget) return ActionStatus::Error;
-    if (moveBehaviour == MoveToBehaviour::ImmediateFinish) return ActionStatus::Complete;
+    if (moveBehaviour == MoveToBehaviour::ImmediateFinish) return movementStatus(accuracy);
 
     const auto player = GW::Agents::GetControlledCharacter();
     if (!player) return ActionStatus::Error;
@@ -469,23 +604,6 @@ struct SkillCastAction::CastState {
     std::atomic_bool active = true;
     std::atomic<Dispatch> dispatch = Dispatch::Pending;
     std::atomic<ActionStatus> result = ActionStatus::Running;
-
-    static std::chrono::milliseconds ReadPing()
-    {
-        struct LatencyFrameContext {
-            uint8_t unused[0x20];
-            uint32_t averagePing;
-            uint32_t unused24;
-            uint32_t currentPing;
-        };
-        static_assert(sizeof(LatencyFrameContext) == 0x2c);
-        // Match LatencyWidget's DnStat context, resolving it again because frames can be recreated.
-        const auto frame = GW::UI::GetFrameByLabel(L"DnStat");
-        const auto context = frame && frame->IsCreated() && !frame->IsBeingDestroyed()
-            ? static_cast<const LatencyFrameContext*>(GW::UI::GetFrameContext(frame)) : nullptr;
-        const auto measured = context ? std::max(context->currentPing, context->averagePing) : 0;
-        return std::chrono::milliseconds{std::clamp(measured ? measured : 250u, 50u, 5000u)};
-    }
 };
 
 SkillCastAction::~SkillCastAction()
@@ -551,7 +669,7 @@ void SkillCastAction::beginCast(const size_t slot)
             state->dispatch = CastState::Dispatch::Rejected;
             return;
         }
-        state->ping = CastState::ReadPing();
+        state->ping = ReadActionPing();
         state->dispatchedAt = std::chrono::steady_clock::now();
         state->nextCheckAt = state->dispatchedAt + state->ping;
         state->dispatch = CastState::Dispatch::Dispatching;
@@ -580,7 +698,7 @@ ActionStatus SkillCastAction::isComplete() const
     const auto player = GW::Agents::GetControlledCharacter();
     if (!player || player->agent_id != state->agentId) return ActionStatus::Error;
 
-    const auto ping = CastState::ReadPing();
+    const auto ping = ReadActionPing();
     state->ping = std::max(state->ping, ping);
     state->nextCheckAt = now + ping;
     const auto timeout = state->castAllowance + std::max(std::chrono::milliseconds{1000}, 4 * state->ping);
@@ -1467,6 +1585,8 @@ ActionStatus ConditionedAction::isComplete() const
                 return ActionStatus::Running;
             case ActionStatus::Complete:
                 return finishFirstAction();
+            case ActionStatus::Stopped:
+                return ActionStatus::Stopped;
             default:
                 first->finalAction();
                 currentlyExecutedActions.clear();

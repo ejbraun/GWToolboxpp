@@ -1218,6 +1218,10 @@ void SpeedrunScriptingTools::Update(float delta)
                         currentAction.finalAction();
                         currentActions.erase(currentActions.begin(), currentActions.begin() + 1);
                         break;
+                    case ActionStatus::Stopped:
+                        currentAction.finalAction();
+                        currentActions.clear();
+                        break;
                     default:
                         logMessage(std::format("Stopped script {}: action {} failed.", currentScript.name, toString(currentAction.type())));
                         currentAction.finalAction();

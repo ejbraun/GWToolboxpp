@@ -54,7 +54,8 @@ namespace {
         // ... rest of 815-byte structure ...
     };
 
-    using OnProcessInput_pt = bool(__cdecl*)(uint32_t* wParam, uint32_t* lParam);
+    // GW reads all 32 return bits; bool leaves stale upper bytes after LeaveHook.
+    using OnProcessInput_pt = int(__cdecl*)(uint32_t* wParam, uint32_t* lParam);
     OnProcessInput_pt ProcessInput_Func = nullptr;
     OnProcessInput_pt ProcessInput_Ret = nullptr;
 
@@ -113,12 +114,12 @@ namespace {
     }
 
     // Override (and rewrite) GW's handling of mouse event 0x200 to stop camera glitching.
-    bool OnProcessInput(uint32_t* wParam, uint32_t* lParam)
+    int __cdecl OnProcessInput(uint32_t* wParam, uint32_t* lParam)
     {
         GW::Hook::EnterHook();
         if (!(wParam && lParam && ProcessInput_Ret)) {
             GW::Hook::LeaveHook();
-            return false;
+            return 0;
         }
         auto input = wParam;
         std::array<uint32_t, 4> current_message{};

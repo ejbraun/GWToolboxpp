@@ -24,7 +24,7 @@
 - Allow chat commands and hotkeys to run while Guild Wars is in the background, and recover hotkey readiness after early injection, settings reloads, and map changes.
 - Refresh GWCA's key-input frame and defer key release to the next game loop so skill requests survive UI recreation and queued input processing.
 
-## v5 - 2026-09-11
+## v6 - 2026-09-14
 - Publish the latest teambuild and cursor fixes under a new launcher update revision.
 - Include hotkey startup recovery, background hotkey and chat-command support, and the skill-input compatibility fixes.
 - Preserve agent-existence validation in the hidden-NPC targeting bypass, preventing Guild Wars assertions when a saved or queued target has despawned.

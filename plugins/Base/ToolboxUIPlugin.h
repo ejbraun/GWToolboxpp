@@ -17,6 +17,8 @@ public:
     bool DrawTabButton(bool show_icon, bool show_text, bool center_align_text) override;
 
 protected:
+    void LoadUISettings();
+    void SaveUISettings();
     ImGuiWindowFlags GetWinFlags(ImGuiWindowFlags flags = 0) const;
 
     bool show_closebutton = true;

@@ -27,3 +27,9 @@
 ## v6 - 2026-09-11
 - Publish updated SST skill-cast handling and background keyboard triggers under a new launcher update revision.
 - Fix SST progress conditions reading missing or stale game memory by tracking mission-progress packets, and guard unavailable skill metadata.
+- Fix TargetDetector restoring a despawned target after marking finishes, marks are cleared, or the feature unloads.
+- Fix Skin Changer applying overrides after the visual refresh, handle items already loaded and live settings changes, and restore original item appearances on removal or unload.
+- Fix minipet transmog scale, NPC-slot collisions and missed or rejected item-use attempts.
+- Preserve SST scripts and saved settings when a config read or decode fails, show the failure with a retry option, and only create backups after successful saves.
+- Restore SST JSON backups as well as legacy INI backups without clearing scripts when a backup is unreadable or invalid.
+- Require matching GW cast-completion notifications before SST advances, including instant skills; use the client ping for periodic checks and timeout allowance, and release failed or cancelled actions safely.

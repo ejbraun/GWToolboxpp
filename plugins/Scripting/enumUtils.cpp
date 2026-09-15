@@ -284,7 +284,7 @@ std::string_view toString(MoveToBehaviour behaviour)
         case MoveToBehaviour::RepeatIfIdle:
             return "Finish when at target, repeat move if not moving";
         case MoveToBehaviour::ImmediateFinish:
-            return "Immediately finish";
+            return "Finish when movement starts";
     }
     return "";
 }

@@ -61,6 +61,7 @@ enum class ActionStatus {
     Error,
     CompleteAndEnteringCriticalSection,
     CompleteAndLeavingCriticalSection,
+    Stopped,
 };
 
 class Action {

@@ -27,3 +27,5 @@
 ## v5 - 2026-09-11
 - Publish the latest teambuild and cursor fixes under a new launcher update revision.
 - Include hotkey startup recovery, background hotkey and chat-command support, and the skill-input compatibility fixes.
+- Preserve agent-existence validation in the hidden-NPC targeting bypass, preventing Guild Wars assertions when a saved or queued target has despawned.
+- Preserve the active keyboard layout during startup layout detection, reuse an already installed en-US layout, and validate the native layout address before accessing it.

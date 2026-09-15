@@ -370,15 +370,19 @@ namespace {
         struct HotPatch {
             const char* name;
             uintptr_t rva;
-            std::array<BYTE, 3> expected;
-            std::array<BYTE, 3> replacement;
+            std::array<BYTE, 5> expected;
+            std::array<BYTE, 5> replacement;
             size_t size;
             DWORD old_protection = 0;
             bool needs_write = false;
         };
 
         std::array patches{
-            HotPatch{"target filter bypass", 0x1913, {0xff, 0x37, 0x00}, {0xeb, 0x3c, 0x00}, 2},
+            // An older Toolbox may have left GWCA loaded with a jump that skips both agent lookups.
+            HotPatch{"restore target existence checks", 0x1913, {0xeb, 0x3c}, {0xff, 0x37}, 2},
+            // Replace each flag predicate with a non-null check; Guild Wars asserts on nonexistent target IDs.
+            HotPatch{"manual target flag bypass", 0x191d, {0xe8, 0xb3, 0x05, 0x00, 0x00}, {0x85, 0xc0, 0x0f, 0x95, 0xc0}, 5},
+            HotPatch{"auto target flag bypass", 0x193f, {0xe8, 0x91, 0x05, 0x00, 0x00}, {0x85, 0xc0, 0x0f, 0x95, 0xc0}, 5},
             // The Game frame can be recreated after the first lookup; the cached pointer is never invalidated.
             HotPatch{"refresh key input frame", 0x14b60, {0x75, 0x10, 0x00}, {0x90, 0x90, 0x00}, 2},
             // Enqueue now runs inline on the game thread unless forced, collapsing key-down/up into one tick.

@@ -92,12 +92,25 @@ void RangeRenderer::LoadSettings(const SettingsDoc& doc, const ToolboxIni* ini, 
         }
     }
 
+    auto spirit_extended_range_migrated = false;
+    doc.Get(section, "spirit_extended_range_migrated", spirit_extended_range_migrated);
+    if (!spirit_extended_range_migrated) {
+        // Saved defaults otherwise override the corrected GWCA range.
+        for (auto& circle : circles_) {
+            if (circle.label == "Spirit Extended" && circle.radius == 3500.f) {
+                circle.radius = GW::Constants::Range::SpiritExtended;
+            }
+        }
+    }
+
     Invalidate();
 }
 
 void RangeRenderer::SaveSettings(SettingsDoc& doc, const char* section) const
 {
     doc.Set(section, "range_circles", circles_);
+    // Run once per config so subsequent custom radius edits remain intact.
+    doc.Set(section, "spirit_extended_range_migrated", true);
 }
 
 void RangeRenderer::DrawSettings()
@@ -110,7 +123,9 @@ void RangeRenderer::DrawSettings()
         }
     });
 
-    ImGui::TextDisabled("Radius in gwinches: Aggro=1012, Cast=1248, Spirit=2512, Extended=3500, Compass=5000");
+    ImGui::TextDisabled("Radius in gwinches: Aggro=%.0f, Cast=%.0f, Spirit=%.0f, Extended=%.0f, Compass=%.0f",
+                        GW::Constants::Range::Earshot, GW::Constants::Range::Spellcast, GW::Constants::Range::Spirit,
+                        GW::Constants::Range::SpiritExtended, GW::Constants::Range::Compass);
     ImGui::Separator();
 
     const float spacing = ImGui::GetStyle().ItemInnerSpacing.x;

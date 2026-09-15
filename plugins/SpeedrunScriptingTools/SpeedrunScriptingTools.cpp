@@ -13,6 +13,7 @@
 
 #include <BackupManager.h>
 #include <PluginUtils.h>
+#include <Utils/FilePersistence.h>
 
 #include <GWCA/GWCA.h>
 
@@ -118,10 +119,7 @@ namespace {
             }
         }
         if (!iniToLoad.empty()) {
-            ToolboxIni ini;
-            PLUGIN_ASSERT(ini.LoadIfExists(iniToLoad) == SI_OK);
-            ini.location_on_disk = iniToLoad;
-            instance->loadFromIniFile(ini);
+            instance->loadFromBackup(iniToLoad);
         }
     }
 
@@ -739,6 +737,10 @@ void SpeedrunScriptingTools::Draw(IDirect3DDevice9*)
 
     ImGui::SetNextWindowSize(ImVec2(340.f, 0.f), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("SST Script Toggles###SpeedrunScriptingTools", show_closebutton ? visible : nullptr, GetWinFlags())) {
+        if (drawSettingsError()) {
+            ImGui::End();
+            return;
+        }
         auto toggles_changed = false;
         const auto set_script_state = [&](const bool enabled) {
             for (auto& group : m_groups) {
@@ -809,6 +811,7 @@ void SpeedrunScriptingTools::Draw(IDirect3DDevice9*)
 void SpeedrunScriptingTools::DrawSettings()
 {
     ToolboxUIPlugin::DrawSettings();
+    if (drawSettingsError()) return;
 
     if (GW::Map::GetInstanceType() == GW::Constants::InstanceType::Loading || !GW::Agents::GetControlledCharacter()) {
         return;
@@ -918,66 +921,100 @@ void SpeedrunScriptingTools::DrawSettings()
     if (groupDisabledKeysChanged || scriptDisabledKeysChanged) refreshDisabledKeys();
 }
 
-void SpeedrunScriptingTools::loadFromIniFile(const ToolboxIni& ini)
+bool SpeedrunScriptingTools::reportSettingsError(std::string error)
 {
-    clear();
-    m_scripts.clear();
-    m_groups.clear();
+    settingsLoadError = std::move(error);
+    logMessage(settingsLoadError, Name());
+    return false;
+}
 
-    const long savedVersion = ini.GetLongValue(Name(), "version", 1);
-    runInOutposts = ini.GetBoolValue(Name(), "runInOutpost", false);
-    alwaysBlockHotkeyKeys = ini.GetBoolValue(Name(), "alwaysBlockHotkeyKeys", false);
-    clearScriptsKey.keyData = ini.GetLongValue(Name(), "clearScriptsKey", 0);
-    clearScriptsKey.modifier = ini.GetLongValue(Name(), "clearScriptsMod", 0);
+bool SpeedrunScriptingTools::drawSettingsError()
+{
+    if (settingsLoadError.empty()) return false;
+    ImGui::TextWrapped("%s", settingsLoadError.c_str());
+    ImGui::TextWrapped("SST settings will not be saved until a config or backup loads successfully.");
+    if (!settingsFolder.empty() && ImGui::Button("Retry loading SST settings")) {
+        const auto folder = settingsFolder;
+        LoadSettings(folder.c_str());
+    }
+    return !settingsLoadError.empty();
+}
 
-    if (savedVersion == 8) logMessage("Scripts from versions before 1.3 cannot be imported");
-    if (savedVersion < 10) return;
+bool SpeedrunScriptingTools::loadFromIniFile(const ToolboxIni& ini)
+{
+    const auto savedVersion = ini.GetLongValue(Name(), "version", 1);
+    if (savedVersion < 10 || savedVersion > currentVersion) {
+        return reportSettingsError(std::format("SST config version {} is not supported; the current scripts were kept.", savedVersion));
+    }
 
+    // Failed reads or decodes must not replace the live list with a partial or empty configuration.
+    std::vector<Script> scripts;
+    std::vector<Group> groups;
     if (std::string read = ini.GetValue(Name(), "scripts", ""); !read.empty()) {
         const auto decoded = decodeString(std::move(read));
-        if (!decoded) return;
+        if (!decoded || decoded->empty()) return reportSettingsError("Unable to decode the saved SST scripts.");
         InputStream stream(decoded.value());
-        while (stream && stream.peek() == 'S') {
-            stream.get();
+        while (stream.peek() != EOF) {
+            if (stream.get() != 'S') return reportSettingsError("Unexpected data in the saved SST scripts.");
             if (auto nextScript = deserializeScript(stream, savedVersion))
-                m_scripts.push_back(std::move(*nextScript));
+                scripts.push_back(std::move(*nextScript));
             else
-                break;
+                return reportSettingsError("Unable to read a saved SST script.");
         }
     }
 
     if (std::string read = ini.GetValue(Name(), "groups", ""); !read.empty()) {
         const auto decoded = decodeString(std::move(read));
-        if (!decoded) return;
+        if (!decoded || decoded->empty()) return reportSettingsError("Unable to decode the saved SST groups.");
         InputStream stream(decoded.value());
-        while (stream && stream.get() == 'G') {
+        while (stream.peek() != EOF) {
+            if (stream.get() != 'G') return reportSettingsError("Unexpected data in the saved SST groups.");
             if (auto nextGroup = deserializeGroup(stream))
-                m_groups.push_back(std::move(*nextGroup));
+                groups.push_back(std::move(*nextGroup));
             else
-                break;
+                return reportSettingsError("Unable to read a saved SST group.");
         }
     }
-    refreshDisabledKeys();
-}
-void SpeedrunScriptingTools::LoadSettings(const wchar_t* folder)
-{
-    ToolboxUIPlugin::LoadSettings(folder);
-    BackupManager::getInstance().initialize(folder);
 
-    long version = 1;
+    clear();
+    m_scripts = std::move(scripts);
+    m_groups = std::move(groups);
+    runInOutposts = ini.GetBoolValue(Name(), "runInOutpost", false);
+    alwaysBlockHotkeyKeys = ini.GetBoolValue(Name(), "alwaysBlockHotkeyKeys", false);
+    clearScriptsKey.keyData = ini.GetLongValue(Name(), "clearScriptsKey", 0);
+    clearScriptsKey.modifier = ini.GetLongValue(Name(), "clearScriptsMod", 0);
+    refreshDisabledKeys();
+    settingsLoaded = true;
+    settingsLoadError.clear();
+    return true;
+}
+
+bool SpeedrunScriptingTools::loadFromSettingsDoc(const SettingsDoc& doc, const ToolboxIni& legacy)
+{
+    auto version = currentVersion;
+    if (!doc.Has(Name(), "version") && !legacy.KeyExists(Name(), "version")
+        && (doc.Has(Name(), "scripts") || doc.Has(Name(), "groups") || legacy.KeyExists(Name(), "scripts") || legacy.KeyExists(Name(), "groups"))) {
+        return reportSettingsError("The saved SST scripts have no format version.");
+    }
     bool runInOutpostSetting = false;
     bool blockHotkeysSetting = false;
     long clearKeySetting = 0;
     long clearModSetting = 0;
     std::string scriptsSetting;
     std::string groupsSetting;
-    LoadSetting("version", version);
-    LoadSetting("runInOutpost", runInOutpostSetting);
-    LoadSetting("alwaysBlockHotkeyKeys", blockHotkeysSetting);
-    LoadSetting("clearScriptsKey", clearKeySetting);
-    LoadSetting("clearScriptsMod", clearModSetting);
-    LoadSetting("scripts", scriptsSetting);
-    LoadSetting("groups", groupsSetting);
+    const auto read = [&](const char* key, auto& value) {
+        using T = std::remove_cvref_t<decltype(value)>;
+        if (doc.Has(Name(), key)) {
+            return doc.Get(Name(), key, value) || reportSettingsError(std::format("Invalid SST setting '{}'.", key));
+        }
+        if constexpr (std::same_as<T, bool>) value = legacy.GetBoolValue(Name(), key, value);
+        else if constexpr (std::same_as<T, long>) value = legacy.GetLongValue(Name(), key, value);
+        else value = legacy.GetValue(Name(), key, value.c_str());
+        return true;
+    };
+    if (!read("version", version) || !read("runInOutpost", runInOutpostSetting)
+        || !read("alwaysBlockHotkeyKeys", blockHotkeysSetting) || !read("clearScriptsKey", clearKeySetting)
+        || !read("clearScriptsMod", clearModSetting) || !read("scripts", scriptsSetting) || !read("groups", groupsSetting)) return false;
 
     // loadFromIniFile expects a ToolboxIni; build one in-memory from the JSON-backed
     // values above so the existing parsing/deserialization logic can stay untouched
@@ -990,15 +1027,89 @@ void SpeedrunScriptingTools::LoadSettings(const wchar_t* folder)
     ini.SetLongValue(Name(), "clearScriptsMod", clearModSetting);
     ini.SetValue(Name(), "scripts", scriptsSetting.c_str());
     ini.SetValue(Name(), "groups", groupsSetting.c_str());
+    return loadFromIniFile(ini);
+}
 
-    loadFromIniFile(ini);
-    if (m_scripts.empty() && m_groups.empty() && BackupManager::getInstance().backupCount(PluginUtils::StringToWString(Name())) > 0) {
-        logMessage("No scripts loaded, but automatic backups found. Type \"/restore SST help\" to see options for restoring backups", Name());
+void SpeedrunScriptingTools::LoadSettings(const wchar_t* folder)
+{
+    settingsFolder = folder;
+    try {
+        BackupManager::getInstance().initialize(folder);
     }
+    catch (const std::filesystem::filesystem_error& error) {
+        logMessage(std::format("SST backups are unavailable: {}", error.what()), Name());
+    }
+    const auto jsonPath = GetSettingFile(folder);
+    const auto legacyPath = GetLegacySettingFile(folder);
+    SettingsDoc stagedSettings;
+    ToolboxIni stagedLegacy;
+    {
+        const FilePersistence::ScopedConfigLock configLock;
+        if (!configLock.Acquired()) {
+            reportSettingsError(std::format("Unable to load SST settings: {}", configLock.Error()));
+            return;
+        }
+        std::error_code error;
+        const auto jsonExists = std::filesystem::exists(jsonPath, error);
+        const auto jsonSize = jsonExists ? std::filesystem::file_size(jsonPath, error) : 0;
+        if (error || (jsonExists && jsonSize == 0) || !stagedSettings.LoadFile(jsonPath)) {
+            reportSettingsError(std::format("Unable to read SST settings from '{}'.", jsonPath.string()));
+            return;
+        }
+        if (jsonExists && !stagedSettings.Empty() && !stagedSettings.HasSection(Name())) {
+            reportSettingsError(std::format("No SST settings section was found in '{}'.", jsonPath.string()));
+            return;
+        }
+        const auto legacyExists = std::filesystem::exists(legacyPath, error);
+        if (error || (legacyExists && (stagedLegacy.LoadFile(legacyPath) != SI_OK || !stagedLegacy.GetSection(Name())))) {
+            reportSettingsError(std::format("Unable to read legacy SST settings from '{}'.", legacyPath.string()));
+            return;
+        }
+    }
+    if (!loadFromSettingsDoc(stagedSettings, stagedLegacy)) return;
+    settings = std::move(stagedSettings);
+    legacy_ini = std::move(stagedLegacy);
+    LoadUISettings();
+
+    try {
+        if (m_scripts.empty() && m_groups.empty() && BackupManager::getInstance().backupCount(PluginUtils::StringToWString(Name())) > 0) {
+            logMessage("No scripts loaded, but automatic backups found. Type \"/restore SST help\" to see options for restoring backups", Name());
+        }
+    }
+    catch (const std::filesystem::filesystem_error& error) {
+        logMessage(std::format("SST settings loaded, but backups are unavailable: {}", error.what()), Name());
+    }
+}
+
+bool SpeedrunScriptingTools::loadFromBackup(const std::filesystem::path& path)
+{
+    const FilePersistence::ScopedConfigLock configLock;
+    if (!configLock.Acquired()) return reportSettingsError(std::format("Unable to read SST backup: {}", configLock.Error()));
+    std::ifstream file(path, std::ios::binary);
+    auto contents = std::string(std::istreambuf_iterator<char>(file), {});
+    if (!file || file.bad()) return reportSettingsError(std::format("Unable to read SST backup '{}'.", path.string()));
+    // New backups contain JSON even though their historical filename extension is .txt.
+    if (contents.starts_with("\xef\xbb\xbf")) contents.erase(0, 3);
+    const auto first = contents.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return reportSettingsError("The selected SST backup is empty.");
+    if (contents[first] == '{') {
+        SettingsDoc backup;
+        if (!backup.LoadFile(path) || !backup.Has(Name(), "version")) return reportSettingsError("The selected SST backup is not a valid SST JSON config.");
+        return loadFromSettingsDoc(backup, ToolboxIni{});
+    }
+    ToolboxIni backup;
+    backup.LoadBuffer(contents);
+    return loadFromIniFile(backup);
 }
 
 void SpeedrunScriptingTools::SaveSettings(const wchar_t* folder)
 {
+    if (!settingsLoaded || !settingsLoadError.empty()) return;
+    const FilePersistence::ScopedConfigLock configLock;
+    if (!configLock.Acquired()) {
+        logMessage(std::format("Unable to save SST settings: {}", configLock.Error()), Name());
+        return;
+    }
     SaveSetting("version", currentVersion);
     SaveSetting("runInOutpost", runInOutposts);
     SaveSetting("alwaysBlockHotkeyKeys", alwaysBlockHotkeyKeys);
@@ -1027,10 +1138,18 @@ void SpeedrunScriptingTools::SaveSettings(const wchar_t* folder)
         }
     }
 
-    ToolboxUIPlugin::SaveSettings(folder);
-
-    if (!m_scripts.empty() || !m_groups.empty()) {
-        BackupManager::getInstance().save(PluginUtils::StringToWString(Name()), GetSettingFile(folder));
+    SaveUISettings();
+    if (!settings.SaveFile(GetSettingFile(folder))) {
+        logMessage("Unable to save SST settings; the previous file and backups were kept.", Name());
+        return;
+    }
+    try {
+        if (!m_scripts.empty() || !m_groups.empty()) {
+            BackupManager::getInstance().save(PluginUtils::StringToWString(Name()), GetSettingFile(folder));
+        }
+    }
+    catch (const std::filesystem::filesystem_error& error) {
+        logMessage(std::format("SST settings saved, but the backup failed: {}", error.what()), Name());
     }
 }
 

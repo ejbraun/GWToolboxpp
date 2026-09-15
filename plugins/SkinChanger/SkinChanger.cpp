@@ -23,6 +23,7 @@
 #include <GWCA/Managers/AgentMgr.h>
 
 #include <GWCA/Utilities/Hook.h>
+#include <GWCA/Utilities/Scanner.h>
 
 #include "PluginUtils.h"
 #include "AsyncStringDecoder.h"
@@ -30,6 +31,8 @@
 #include "BackupManager.h"
 #include "../Scripting/io.h"
 
+#include <atomic>
+#include <charconv>
 #include <format>
 #include <sstream>
 
@@ -38,7 +41,11 @@ namespace
     SkinChanger* activeSkinChanger = nullptr;
     GW::HookEntry UseItem_Entry;
     GW::HookEntry AgentAdd_Entry;
-    bool hasAgentAddHook = false;
+    GW::HookEntry AgentRemove_Entry;
+    GW::HookEntry ItemUpdated_Entry;
+    std::recursive_mutex skinChangerMutex;
+    bool refreshItems = false;
+    std::atomic_bool restorationPending = false;
     GW::HookEntry InstanceLoadFile_Entry;
     GW::HookEntry ItemGeneral_Entry;
     GW::HookEntry ItemGeneralReuse_Entry;
@@ -60,9 +67,42 @@ namespace
     struct MiniPetStatus 
     {
         std::optional<uint32_t> poppedMinipetId = std::nullopt;
-        std::chrono::time_point<std::chrono::steady_clock> lastPop = std::chrono::steady_clock::now();
+        uint32_t agentID = 0;
+        std::chrono::time_point<std::chrono::steady_clock> lastPop{};
     };
     MiniPetStatus minipetStatus;
+
+    struct ItemAppearance {
+        uint32_t modelFileID;
+        GW::DyeInfo dye;
+        uint32_t interaction;
+
+        bool operator==(const ItemAppearance& other) const {
+            return modelFileID == other.modelFileID && interaction == other.interaction
+                && memcmp(&dye, &other.dye, sizeof(dye)) == 0;
+        }
+    };
+    struct OriginalItem {
+        InventoryItem identity;
+        ItemAppearance original;
+        ItemAppearance applied;
+    };
+    std::map<uint32_t, OriginalItem> originalItems;
+
+    using NotifyItemChanged_pt = void(__fastcall*)(GW::Item*, void*);
+    NotifyItemChanged_pt NotifyItemChanged = nullptr;
+
+    ItemAppearance GetAppearance(const GW::Item* item)
+    {
+        return {item->model_file_id, item->dye, item->interaction};
+    }
+
+    void SetAppearance(GW::Item* item, const ItemAppearance& appearance)
+    {
+        item->model_file_id = appearance.modelFileID;
+        item->dye = appearance.dye;
+        item->interaction = appearance.interaction;
+    }
 
     std::string decode(const std::wstring& wstring) 
     {
@@ -71,6 +111,7 @@ namespace
         if (entry.decoded.empty() && !entry.pending) {
             entry.pending = true;
             AsyncStringDecoder::Decode(wstring, [&entry](const wchar_t* decoded) {
+                const std::scoped_lock callbackLock(skinChangerMutex);
                 if (decoded) {
                     entry.decoded = decoded;
                 }
@@ -82,17 +123,17 @@ namespace
         return PluginUtils::WStringToString(entry.decoded);
     }
 
-    std::optional<uint32_t> toInt(std::string str)
+    std::optional<uint32_t> toInt(const std::string& str)
     {
-        try 
-        {
-            const auto base = str.starts_with("0x") ? 16 : 10;
-            return static_cast<uint32_t>(std::stoul(str, nullptr, base));
-        }
-        catch (...) 
-        {
-            return std::nullopt;
-        }
+        auto text = std::string_view(str);
+        while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front()))) text.remove_prefix(1);
+        while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) text.remove_suffix(1);
+        const auto base = text.starts_with("0x") || text.starts_with("0X") ? 16 : 10;
+        if (base == 16) text.remove_prefix(2);
+        if (text.empty()) return std::nullopt;
+        auto value = uint32_t{0};
+        const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value, base);
+        return error == std::errc{} && end == text.data() + text.size() ? std::optional{value} : std::nullopt;
     }
 
     // Use std::format (C++23) instead of stringstream — cleaner and avoids heap allocation.
@@ -168,14 +209,16 @@ namespace
 
     bool compareMods(const std::vector<GW::ItemModifier>& vec, const GW::ItemModifier* ptr, size_t size) 
     {
-        if (vec.size() != size) return false;
-        for (size_t i = 0; i < size; ++i)
-            if (vec[i].mod != ptr[i].mod) return false;
-        return true;
+        if (vec.size() != size || (size && !ptr)) return false;
+        if (!size) return true;
+        // Modifier order can change without changing which item the saved rule identifies.
+        return std::is_permutation(vec.begin(), vec.end(), ptr, ptr + size,
+            [](const auto& a, const auto& b) { return a.mod == b.mod; });
     }
 
-    void drawItemSelector(InventoryItem& inventoryItem) 
+    bool drawItemSelector(InventoryItem& inventoryItem)
     {
+        auto changed = false;
         auto bagName = [](GW::Constants::Bag bag) -> const char* {
             switch (bag) {
                 case GW::Constants::Bag::Backpack:       return "Backpack";
@@ -209,7 +252,7 @@ namespace
             {
                 if (item->model_id == inventoryItem.modelID && compareMods(inventoryItem.modifiers, item->mod_struct, item->mod_struct_size)) 
                 {
-                    inventoryItem.encodedName = item->single_item_name;
+                    inventoryItem.encodedName = item->single_item_name ? item->single_item_name : L"";
                     return true;
                 }
                 return false;
@@ -224,7 +267,7 @@ namespace
                 forEachItem([&](const GW::Item* item)
                 {
                     const auto bag = item->bag ? item->bag->bag_id() : GW::Constants::Bag::Backpack;
-                    available_items[bag].push_back(InventoryItem{item->model_id, item->single_item_name, extractMods(item)});
+                    available_items[bag].push_back(InventoryItem{item->model_id, item->single_item_name ? item->single_item_name : L"", extractMods(item)});
                     return false;
                 });
                 needToFetchBagItems = false;
@@ -241,6 +284,7 @@ namespace
                     if (ImGui::Button(decode(bagItem.encodedName).c_str())) 
                     {
                         inventoryItem = bagItem;
+                        changed = true;
                         ImGui::CloseCurrentPopup();
                     }
                     ImGui::PopID();
@@ -257,6 +301,7 @@ namespace
 
             ImGui::EndPopup();
         }
+        return changed;
     }
 
     // Alpha (w) must be 1.f so colors are displayed opaquely in imgui 1.91.8+ where
@@ -375,80 +420,85 @@ namespace
         return value_changed;
     }
 
-    void TransmoAgent(DWORD agent_id, NpcTransmog transmo)
+    void TransmoAgent(const DWORD agent_id, const NpcTransmog& transmo)
     {
-        if (!transmo.npcID || !agent_id)
+        if (transmo.npcID <= 0 || transmo.npcID > 0xffff || !agent_id)
             return;
 
         const auto npcModelFileID = toInt(transmo.npcModelFileID);
         const auto npcModelFileData = toInt(transmo.npcModelFileData);
         const auto flags = toInt(transmo.flags);
-        if (!npcModelFileID || !flags || npcModelFileID == 0) 
+        if (!npcModelFileID || !*npcModelFileID || !flags)
             return;
 
-        const auto agent = static_cast<GW::AgentLiving*>(GW::Agents::GetAgentByID(agent_id));
-        if (!agent || !agent->GetIsLivingType()) return;
-        const auto existingNpc = GW::Agents::GetNPCByID(agent->player_number);
+        const auto world = GW::GetWorldContext();
+        const auto agent = GW::Agents::GetAgentByID(agent_id);
+        if (!world || !agent || !agent->GetIsLivingType()
+            || GW::Map::GetInstanceType() == GW::Constants::InstanceType::Loading) return;
+        const auto existingNpc = GW::Agents::GetNPCByID(agent->GetAsAgentLiving()->player_number);
         // Fixed: cast to uint32_t before shifting into the high byte to avoid signed overflow.
         // The old signed int multiplication could produce a negative value for large scale inputs.
         // scale=0 means "keep original size"; valid non-zero range is 6-255 (matching GWToolbox's /transmog command).
-        const auto scale = transmo.scale ? (static_cast<uint32_t>(std::clamp(transmo.scale, 6, 255)) * 0x1000000u) : (existingNpc ? existingNpc->visual_adjustment.scale : 0x23000000u);
+        const auto originalScale = existingNpc ? static_cast<uint8_t>(existingNpc->visual_adjustment.scale) : 35u;
+        const auto scale = static_cast<uint32_t>(transmo.scale ? std::clamp(transmo.scale, 6, 255) : originalScale) << 24;
 
-        const auto& npcs = GW::GetGameContext()->world->npcs;
-        if (transmo.npcID >= (int)npcs.size() || !npcs[transmo.npcID].model_file_id) 
-        {
-            // Removed GW::NPC staging struct — only two fields were ever read from it,
-            // so capture the values directly instead of constructing an intermediate object.
-            GW::GameThread::Enqueue([npcID = transmo.npcID, fileID = *npcModelFileID, npcFlags = *flags, scale] {
-                    GW::Packet::StoC::NpcGeneralStats packet{};
-                    packet.npc_id = npcID;
-                    packet.file_id = fileID;
-                    // Fixed: pass the computed scale so that the registered NPC uses the
-                    // correct visual size; the default zero-initialized field rendered the NPC invisibly small.
-                    packet.scale = scale;
-                    packet.flags = npcFlags;
-                    packet.profession = 1;
-                    GW::StoC::EmulatePacket(&packet);
-                });
-
-            // Redundant self-rename capture fixed: npcModelFileData = npcModelFileData -> npcModelFileData.
-            GW::GameThread::Enqueue([npcID = transmo.npcID, npcModelFileData] {
-                // Zero-initialize so data[] fields beyond index 0 are not indeterminate.
-                GW::Packet::StoC::NPCModelFile packet{};
-                packet.npc_id = npcID;
-                packet.count = npcModelFileData ? 1 : 0;
-                if (packet.count)
-                    packet.data[0] = *npcModelFileData;
-
-                GW::StoC::EmulatePacket(&packet);
-            });
+        const auto& npcs = world->npcs;
+        if (!npcs.valid() || (npcs.size() && !npcs.m_buffer)) return;
+        auto npcID = static_cast<uint32_t>(transmo.npcID);
+        const auto matchesAppearance = [&](const GW::NPC& npc) {
+            return npc.model_file_id == *npcModelFileID && npc.npc_flags == *flags
+                && (npcModelFileData && *npcModelFileData
+                    ? npc.files_count == 1 && npc.model_files && npc.model_files[0] == *npcModelFileData
+                    : npc.files_count == 0);
+        };
+        if (npcID < npcs.size() && npcs[npcID].model_file_id && !matchesAppearance(npcs[npcID])) {
+            // NPC slots are map-specific; do not substitute or overwrite an unrelated NPC's appearance.
+            npcID = 1;
+            while (npcID < npcs.size() && npcs[npcID].model_file_id && !matchesAppearance(npcs[npcID])) ++npcID;
         }
+        if (npcID > 0xffff) return;
+        if (npcID >= npcs.size() || !npcs[npcID].model_file_id) {
+            // Removed GW::NPC staging struct — only packet fields are needed here,
+            // so use the configured values directly instead of constructing an intermediate object.
+            GW::Packet::StoC::NpcGeneralStats packet{};
+            packet.npc_id = npcID;
+            packet.file_id = *npcModelFileID;
+            // Fixed: pass the computed scale so that the registered NPC uses the
+            // correct visual size; the default zero-initialized field rendered the NPC invisibly small.
+            packet.scale = scale;
+            packet.flags = *flags;
+            packet.profession = 1;
+            GW::StoC::EmulatePacket(&packet);
 
-        const auto encodedName = transmo.nameToApply.empty() ? std::wstring{} : L"\x108\x107" + PluginUtils::StringToWString(transmo.nameToApply) + L"\x1";
+            // The former queued npcModelFileData capture is no longer needed; spawning already runs on the game thread.
+            // Zero-initialize so data[] fields beyond index 0 are not indeterminate.
+            GW::Packet::StoC::NPCModelFile modelPacket{};
+            modelPacket.npc_id = npcID;
+            modelPacket.count = npcModelFileData && *npcModelFileData ? 1 : 0;
+            if (modelPacket.count) modelPacket.data[0] = *npcModelFileData;
+            GW::StoC::EmulatePacket(&modelPacket);
+        }
+        if (npcID >= npcs.size() || !npcs[npcID].model_file_id) return;
 
-        GW::GameThread::Enqueue([npcID = transmo.npcID, npcName = encodedName, agent_id, scale] 
-        {
-            GW::Packet::StoC::AgentScale packet1;
-            packet1.header = GW::Packet::StoC::AgentScale::STATIC_HEADER;
-            packet1.agent_id = agent_id;
-            packet1.scale = scale;
-            GW::StoC::EmulatePacket(&packet1);
+        GW::Packet::StoC::AgentScale packet1{};
+        packet1.agent_id = agent_id;
+        packet1.scale = scale;
+        GW::StoC::EmulatePacket(&packet1);
 
-            GW::Packet::StoC::AgentModel packet2;
-            packet2.header = GW::Packet::StoC::AgentModel::STATIC_HEADER;
-            packet2.agent_id = agent_id;
-            packet2.model_id = npcID;
-            GW::StoC::EmulatePacket(&packet2);
+        GW::Packet::StoC::AgentModel packet2{};
+        packet2.agent_id = agent_id;
+        packet2.model_id = npcID;
+        GW::StoC::EmulatePacket(&packet2);
 
-            if (!npcName.empty()) 
-            {
-                GW::Packet::StoC::AgentName packet;
-                packet.header = GW::Packet::StoC::AgentName::STATIC_HEADER;
-                packet.agent_id = agent_id;
-                wcscpy_s(packet.name_enc, npcName.c_str());
-                GW::StoC::EmulatePacket(&packet);
-            }
-        });
+        if (!transmo.nameToApply.empty()) {
+            auto name = PluginUtils::StringToWString(transmo.nameToApply);
+            if (name.size() > 31) name.resize(31);
+            const auto encodedName = L"\x108\x107" + name + L"\x1";
+            GW::Packet::StoC::AgentName packet{};
+            packet.agent_id = agent_id;
+            wcscpy_s(packet.name_enc, encodedName.c_str());
+            GW::StoC::EmulatePacket(&packet);
+        }
     }
 
     void trim(std::string& s) 
@@ -465,7 +515,7 @@ namespace
         ImGui::SetNextItemWidth(60.f);
         ImGui::PushID(0);
         ImGui::InputInt("##npcid", &npcTransmog.npcID, 0);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Unused NPC slot to register this appearance (e.g. 12). Must not collide with a real NPC ID.");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Preferred NPC slot for this appearance (1-65535). A free slot is chosen if another NPC uses it.");
         ImGui::PopID();
         ImGui::SameLine();
         ImGui::AlignTextToFramePadding();
@@ -504,15 +554,16 @@ namespace
         if (npcTransmog.scale > 255) npcTransmog.scale = 255;
     }
 
-    void drawMinipetSelector(MinipetTransmog& minipetTransmog) 
+    bool drawMinipetSelector(MinipetTransmog& minipetTransmog)
     {
+        auto changed = false;
         ImGui::TextUnformatted("Target:");
         ImGui::Indent();
         ImGui::AlignTextToFramePadding();
         ImGui::Text("Inventory model ID:"); ImGui::SameLine();
         ImGui::SetNextItemWidth(80.f);
         ImGui::PushID(2);
-        { int v = static_cast<int>(minipetTransmog.itemToReplaceModelID); ImGui::InputInt("##miniitem", &v, 0); if (v >= 0) minipetTransmog.itemToReplaceModelID = static_cast<uint32_t>(v); }
+        { int v = static_cast<int>(minipetTransmog.itemToReplaceModelID); changed |= ImGui::InputInt("##miniitem", &v, 0); if (v >= 0) minipetTransmog.itemToReplaceModelID = static_cast<uint32_t>(v); }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Model ID of the minipet item in your inventory (the pop). Triggers the transmog when used.");
         ImGui::PopID();
 
@@ -532,7 +583,7 @@ namespace
         ImGui::Text("Model file (hex):"); ImGui::SameLine();
         ImGui::SetNextItemWidth(90.f);
         ImGui::PushID(3);
-        ImGui::InputText("##miniitemskin", &minipetTransmog.replacementItemModelFileID);
+        changed |= ImGui::InputText("##miniitemskin", &minipetTransmog.replacementItemModelFileID);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Overrides the item's model file in your inventory. Leave as 0x to keep original.");
         ImGui::PopID();
         ImGui::Unindent();
@@ -568,10 +619,11 @@ namespace
                 const auto npc = GW::Agents::GetNPCByID(npcID);
                 if (!npc) return;
                 minipetTransmog.npcTransmog.npcID = npcID;
-                minipetTransmog.npcTransmog.scale = npc->visual_adjustment.scale / 0x1000000;
+                minipetTransmog.npcTransmog.scale = static_cast<uint8_t>(npc->visual_adjustment.scale);
                 minipetTransmog.npcTransmog.flags = toHexString(npc->npc_flags);
                 minipetTransmog.npcTransmog.npcModelFileID = toHexString(npc->model_file_id);
-                if (npc->files_count) 
+                minipetTransmog.npcTransmog.npcModelFileData = "0x";
+                if (npc->files_count && npc->model_files)
                     minipetTransmog.npcTransmog.npcModelFileData = toHexString(npc->model_files[0]);
             }();
         }
@@ -581,6 +633,7 @@ namespace
         drawNpcSelector(minipetTransmog.npcTransmog);
         ImGui::PopID();
         ImGui::Unindent();
+        return changed;
     }
 
     std::optional<uint32_t> getInteractionOverwrite(uint32_t modelFileID) 
@@ -609,6 +662,7 @@ namespace
                              const std::vector<ItemChange>& itemChanges,
                              const std::vector<MinipetTransmog>& minipetTransmogs)
     {
+        if (!item) return;
         const auto itemChangeIt = std::ranges::find_if(itemChanges, [&item](const auto& ic) {
             return ic.item.modelID
                 && ic.item.modelID == item->model_id
@@ -650,6 +704,7 @@ DLLAPI ToolboxPlugin* ToolboxPluginInstance()
 
 void SkinChanger::LoadSettings(const wchar_t* folder)
 {
+    const std::scoped_lock lock(skinChangerMutex);
     ToolboxPlugin::LoadSettings(folder);
     BackupManager::getInstance().initialize(folder);
 
@@ -669,6 +724,7 @@ void SkinChanger::LoadSettings(const wchar_t* folder)
 
 void SkinChanger::SaveSettings(const wchar_t* folder)
 {
+    const std::scoped_lock lock(skinChangerMutex);
     std::string itemsToSave;
     itemsToSave.reserve(4096);
     for (const auto& itemChange : itemChanges) 
@@ -712,6 +768,7 @@ void SkinChanger::SaveSettings(const wchar_t* folder)
 
 void SkinChanger::DrawSettings()
 {
+    const std::scoped_lock lock(skinChangerMutex);
     ToolboxPlugin::DrawSettings();
 
     if (GW::Map::GetInstanceType() == GW::Constants::InstanceType::Loading || !GW::Agents::GetControlledCharacter()) 
@@ -728,33 +785,33 @@ void SkinChanger::DrawSettings()
 
             if (ImGui::Button("X")) indexToDelete = index - 1;
             ImGui::SameLine();
-            drawItemSelector(itemChange.item);
+            refreshItems |= drawItemSelector(itemChange.item);
 
             ImGui::Indent(indent);
 
             ImGui::Text("New model file ID:"); ImGui::SameLine();
             ImGui::SetNextItemWidth(100.f);
-            ImGui::InputText("##modelfileid", &itemChange.modelFileID);
+            refreshItems |= ImGui::InputText("##modelfileid", &itemChange.modelFileID);
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Model file ID to apply to this item (hex, e.g. 0x7F5). Takes effect on next map change.");
+                ImGui::SetTooltip("Model file ID to apply to this item (hex, e.g. 0x7F5). Applies to items already loaded.");
             std::erase_if(itemChange.modelFileID, [](auto c) { return std::isspace(c); });
 
             ImGui::PushID(&itemChange.enableDyes);
-            ImGui::Checkbox("Override dyes", &itemChange.enableDyes);
+            refreshItems |= ImGui::Checkbox("Override dyes", &itemChange.enableDyes);
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("When enabled, forces the item to display with the chosen dye colours");
             ImGui::PopID();
 
             if (itemChange.enableDyes) {
                 ImGui::Text("Dyes:"); ImGui::SameLine();
-                drawDyePicker("Dye 1", &itemChange.dyes[0]); ImGui::SameLine();
-                drawDyePicker("Dye 2", &itemChange.dyes[1]); ImGui::SameLine();
-                drawDyePicker("Dye 3", &itemChange.dyes[2]); ImGui::SameLine();
-                drawDyePicker("Dye 4", &itemChange.dyes[3]); ImGui::SameLine();
+                refreshItems |= drawDyePicker("Dye 1", &itemChange.dyes[0]); ImGui::SameLine();
+                refreshItems |= drawDyePicker("Dye 2", &itemChange.dyes[1]); ImGui::SameLine();
+                refreshItems |= drawDyePicker("Dye 3", &itemChange.dyes[2]); ImGui::SameLine();
+                refreshItems |= drawDyePicker("Dye 4", &itemChange.dyes[3]); ImGui::SameLine();
                 ImGui::Text("Tint:"); ImGui::SameLine();
                 int tint = itemChange.tint;
                 ImGui::SetNextItemWidth(55.f);
-                ImGui::InputInt("##tint", &tint, 0);
+                refreshItems |= ImGui::InputInt("##tint", &tint, 0);
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Dye tint value (0-255)");
                 if (tint < 0) tint = 0;
@@ -766,7 +823,10 @@ void SkinChanger::DrawSettings()
             ImGui::PopID();
         }
         if (ImGui::Button("+##items")) itemChanges.push_back({{}, "0x", false, {GW::DyeColor::None, GW::DyeColor::None, GW::DyeColor::None, GW::DyeColor::None}, 255});
-        if (indexToDelete) itemChanges.erase(itemChanges.begin() + *indexToDelete);
+        if (indexToDelete) {
+            itemChanges.erase(itemChanges.begin() + *indexToDelete);
+            refreshItems = true;
+        }
         if (!itemChanges.empty()) ImGui::Separator();
     }
 
@@ -784,7 +844,7 @@ void SkinChanger::DrawSettings()
             ImGui::TextUnformatted("Minipet to replace:");
 
             ImGui::Indent(indent);
-            drawMinipetSelector(minipetTransmog);
+            refreshItems |= drawMinipetSelector(minipetTransmog);
             ImGui::Unindent(indent);
 
             ImGui::PopID();
@@ -792,7 +852,10 @@ void SkinChanger::DrawSettings()
         ImGui::PushID(&minipetTransmogs);
         if (ImGui::Button("+##minipets")) minipetTransmogs.push_back({});
         ImGui::PopID();
-        if (indexToDelete) minipetTransmogs.erase(minipetTransmogs.begin() + *indexToDelete);
+        if (indexToDelete) {
+            minipetTransmogs.erase(minipetTransmogs.begin() + *indexToDelete);
+            refreshItems = true;
+        }
     }
 
     ImGui::Text("Version 2.0.0");
@@ -800,6 +863,8 @@ void SkinChanger::DrawSettings()
 
 void SkinChanger::loadFromIniFile(const ToolboxIni& ini)
 {
+    const std::scoped_lock lock(skinChangerMutex);
+    refreshItems = true;
     itemChanges.clear();
     minipetTransmogs.clear();
 
@@ -811,11 +876,11 @@ void SkinChanger::loadFromIniFile(const ToolboxIni& ini)
         while (ss) {
             ItemChange itemChange;
 
-            ss >> std::ws >> itemChange.item.modelID >> std::ws;
+            if (!(ss >> std::ws >> itemChange.item.modelID >> std::ws)) return;
 
             uint32_t readMod;
             while (ss && ss.peek() != 'S') {
-                ss >> readMod;
+                if (!(ss >> readMod)) return;
                 itemChange.item.modifiers.push_back({readMod});
                 ss >> std::ws;
             }
@@ -829,19 +894,20 @@ void SkinChanger::loadFromIniFile(const ToolboxIni& ini)
 
             int readDye;
             for (auto& dye : itemChange.dyes) {
-                ss >> readDye;
-                dye = (GW::DyeColor)(readDye);
+                if (!(ss >> readDye)) return;
+                dye = DyeColorFromInt(readDye);
             }
             {
                 // String stream for uint8_t does not what you would expect
                 int read;
-                ss >> read;
+                if (!(ss >> read)) return;
                 if (read >= 0 && read < 256) itemChange.tint = (uint8_t)read;
             }
-            ss >> itemChange.enableDyes;
+            if (!(ss >> itemChange.enableDyes)) return;
 
             std::string read;
             while (ss >> read && read != "END") {}
+            if (!ss || read != "END") return;
 
             itemChanges.push_back(itemChange);
         }
@@ -856,7 +922,7 @@ void SkinChanger::loadFromIniFile(const ToolboxIni& ini)
         {
             MinipetTransmog transmog;
 
-            ss >> transmog.agentToReplaceModelID;
+            if (!(ss >> transmog.agentToReplaceModelID)) return;
             ss >> transmog.itemToReplaceModelID;
             ss >> std::ws >> transmog.replacementItemModelFileID;
             ss >> std::ws >> transmog.npcTransmog.flags;
@@ -882,6 +948,7 @@ void SkinChanger::loadFromIniFile(const ToolboxIni& ini)
 
             std::string read;
             while (ss >> read && read != "END") {}
+            if (!ss || read != "END") return;
             ss >> std::ws;
 
             minipetTransmogs.push_back(transmog);
@@ -889,47 +956,97 @@ void SkinChanger::loadFromIniFile(const ToolboxIni& ini)
     }();
 }
 
-void SkinChanger::applyOverrideToItem(GW::Item* item) const
+bool SkinChanger::applyOverrideToItem(GW::Item* item) const
 {
-    ::applyOverrideToItem(item, itemChanges, minipetTransmogs);
+    if (!item || !item->item_id) return false;
+    const auto current = GetAppearance(item);
+    auto original = current;
+    if (const auto found = originalItems.find(item->item_id); found != originalItems.end()) {
+        const auto& saved = found->second;
+        if (saved.identity.modelID == item->model_id
+            && compareMods(saved.identity.modifiers, item->mod_struct, item->mod_struct_size)
+            && saved.applied == current) {
+            original = saved.original;
+        }
+        else {
+            originalItems.erase(found);
+        }
+    }
+    auto preview = *item;
+    SetAppearance(&preview, original);
+    ::applyOverrideToItem(&preview, itemChanges, minipetTransmogs);
+    const auto desired = GetAppearance(&preview);
+    if (desired == original) {
+        originalItems.erase(item->item_id);
+    }
+    else {
+        originalItems.insert_or_assign(item->item_id,
+            OriginalItem{{item->model_id, {}, extractMods(item)}, original, desired});
+    }
+    if (desired == current) return false;
+    SetAppearance(item, desired);
+    return true;
 }
 
 void SkinChanger::Initialize(ImGuiContext* ctx, ImGuiAllocFns allocator_fns, HMODULE toolbox_dll)
 {
+    const std::scoped_lock lock(skinChangerMutex);
     ToolboxPlugin::Initialize(ctx, allocator_fns, toolbox_dll);
     activeSkinChanger = this;
 
     // Reset transient state so a plugin reload always starts clean.
-    hasAgentAddHook = false;
+    refreshItems = true;
+    restorationPending = false;
+    originalItems.clear();
     needToFetchBagItems = false;
     pendingMinipetTransmog = std::nullopt;
     minipetStatus = {};
     available_items.clear();
 
-    // Use post-packet callbacks on the raw StoC ItemGeneral packets so our writes to model_file_id
-    // happen AFTER the game has applied all packet fields to GW::Item. A UI message callback for
-    // kItemUpdated fires as a pre-callback (before frame handlers write the item data), so any
-    // changes we make there get overwritten immediately by the game's own processing.
-    const auto itemGeneralHandler = [this](GW::HookStatus*, const GW::Packet::StoC::ItemGeneral_FirstID* pak) {
-        const auto item = GW::Items::GetItemById(pak->item_id);
-        if (!item) return;
-        applyOverrideToItem(item);
-    };
-    GW::StoC::RegisterPostPacketCallback<GW::Packet::StoC::ItemGeneral_FirstID>(&ItemGeneral_Entry, itemGeneralHandler);
-    GW::StoC::RegisterPostPacketCallback<GW::Packet::StoC::ItemGeneral_ReuseID>(&ItemGeneralReuse_Entry,
-        [this](GW::HookStatus*, const GW::Packet::StoC::ItemGeneral_ReuseID* pak) {
-            const auto item = GW::Items::GetItemById(pak->item_id);
-            if (!item) return;
-            applyOverrideToItem(item);
+    // kItemUpdated follows the item writes but precedes equipment refresh; the old post-StoC
+    // writes were too late, and the UI payload is only an item ID, not a full ItemGeneral packet.
+    GW::UI::RegisterUIMessageCallback(&ItemUpdated_Entry, GW::UI::UIMessage::kItemUpdated,
+        [this](GW::HookStatus* status, GW::UI::UIMessage, void* wparam, void*) {
+            const std::scoped_lock callbackLock(skinChangerMutex);
+            if (!status->blocked && wparam && activeSkinChanger == this) {
+                applyOverrideToItem(GW::Items::GetItemById(*static_cast<uint32_t*>(wparam)));
+            }
         });
+    const auto itemGeneralHandler = [](GW::HookStatus* status, const GW::Packet::StoC::ItemGeneral_FirstID* pak) {
+        const std::scoped_lock callbackLock(skinChangerMutex);
+        // A server refresh or reused ID supplies a new baseline, even when the item has identical stats.
+        if (!status->blocked) originalItems.erase(pak->item_id);
+    };
+    GW::StoC::RegisterPacketCallback<GW::Packet::StoC::ItemGeneral_FirstID>(&ItemGeneral_Entry, itemGeneralHandler, 0);
+    GW::StoC::RegisterPacketCallback<GW::Packet::StoC::ItemGeneral_ReuseID>(&ItemGeneralReuse_Entry, itemGeneralHandler, 0);
+
+    // The game's item-change notification refreshes inventory, equipped copies and costume parts together.
+    constexpr char notifyPattern[] = "\x55\x8b\xec\x51\x56\x8b\xf1\x8b\x46\x04\x85\xc0\x74\x09\x50\xe8"
+        "\x00\x00\x00\x00\x83\xc4\x04\x8b\x06\x89\x45\xfc\x8d\x45\xfc\x6a\x00\x50\x68\x06\x01\x00\x10\xe8"
+        "\x00\x00\x00\x00\xff\x36\xe8\x00\x00\x00\x00\x83\xc4\x10\x5e\x8b\xe5\x5d\xc3";
+    constexpr char notifyMask[] = "xxxxxxxxxxxxxxxx????xxxxxxxxxxxxxxxxxxxx????xxx????xxxxxxxx";
+    static_assert(sizeof(notifyPattern) == sizeof(notifyMask));
+    const auto notifyAddress = GW::Scanner::Find(notifyPattern, notifyMask);
+    auto textEnd = uintptr_t{0};
+    GW::Scanner::GetSectionAddressRange(GW::ScannerSection::Section_TEXT, nullptr, &textEnd);
+    const auto duplicate = notifyAddress
+        ? GW::Scanner::FindInRange(notifyPattern, notifyMask, 0, notifyAddress + 1, textEnd) : 0;
+    NotifyItemChanged = notifyAddress && !duplicate ? reinterpret_cast<NotifyItemChanged_pt>(notifyAddress) : nullptr;
+    if (!NotifyItemChanged) {
+        logMessage("Live appearance refresh is unavailable; skins will apply on the next game item update.", Name());
+    }
 
     GW::StoC::RegisterPostPacketCallback<GW::Packet::StoC::InstanceLoadFile>(&InstanceLoadFile_Entry, [this](GW::HookStatus*, const GW::Packet::StoC::InstanceLoadFile*) {
+        const std::scoped_lock callbackLock(skinChangerMutex);
         using namespace std::chrono_literals;
-        minipetStatus.poppedMinipetId = std::nullopt;
+        refreshItems = true;
+        pendingMinipetTransmog = std::nullopt;
+        minipetStatus = {};
         minipetStatus.lastPop = std::chrono::steady_clock::now() - 1h;
     });
 
     GW::Chat::CreateCommand(&RestoreChatCmd_HookEntry, L"restore", [](GW::HookStatus* status, const wchar_t*, const int argc, const LPWSTR* argv) {
+        const std::scoped_lock callbackLock(skinChangerMutex);
         const auto instance = activeSkinChanger;
         if (!instance || argc < 2) {
             status->blocked = false;
@@ -989,75 +1106,118 @@ void SkinChanger::Initialize(ImGuiContext* ctx, ImGuiAllocFns allocator_fns, HMO
 
     // Use [this] instead of [&] to avoid capturing dangling references if the callback
     // fires after SignalTerminate has begun tearing down local state.
-    GW::UI::RegisterUIMessageCallback(&UseItem_Entry, GW::UI::UIMessage::kSendUseItem, [this](GW::HookStatus*, GW::UI::UIMessage, void* wparam, void*) {
-        if (!wparam) return;
+    GW::UI::RegisterUIMessageCallback(&UseItem_Entry, GW::UI::UIMessage::kSendUseItem, [this](GW::HookStatus* status, GW::UI::UIMessage, void* wparam, void*) {
+        const std::scoped_lock callbackLock(skinChangerMutex);
+        if (status->blocked || !wparam || activeSkinChanger != this
+            || GW::Map::GetInstanceType() == GW::Constants::InstanceType::Loading) return;
 
-        const auto item = GW::Items::GetItemById((uint32_t)wparam);
+        const auto item = GW::Items::GetItemById(reinterpret_cast<uint32_t>(wparam));
         if (!item) return;
+        const auto potentialTransmog = std::ranges::find_if(minipetTransmogs,
+            [id = item->model_id](const auto& transmog) { return transmog.itemToReplaceModelID == id; });
+        if (potentialTransmog == minipetTransmogs.end()) return;
 
-        const auto potentialTransmog = std::ranges::find_if(minipetTransmogs, [id = item->model_id](const auto& transmog) { return transmog.itemToReplaceModelID == id; });
-        const auto isGhostInTheBox = item->model_id == GW::Constants::ItemID::GhostInTheBox;
-        if (!isGhostInTheBox && potentialTransmog == minipetTransmogs.end()) return;
+        pendingMinipetTransmog = std::nullopt;
+        if (minipetStatus.poppedMinipetId == item->model_id && GW::Agents::GetAgentByID(minipetStatus.agentID)) return;
+        // Confirm through the spawn packet; a rejected use must not make the next attempt look like a dismissal.
+        minipetStatus.lastPop = std::chrono::steady_clock::now();
+        pendingMinipetTransmog = *potentialTransmog;
+    }, 0x8000);
+    // Use [this] instead of [&] for the same reason as the UseItem callback above.
+    GW::StoC::RegisterPostPacketCallback<GW::Packet::StoC::AgentAdd>(&AgentAdd_Entry, [this](GW::HookStatus* status, const GW::Packet::StoC::AgentAdd* pak)
+    {
+        const std::scoped_lock callbackLock(skinChangerMutex);
+        if (activeSkinChanger != this || GW::Map::GetInstanceType() == GW::Constants::InstanceType::Loading) return;
+        if (status->blocked || !pak->agent_type || !pendingMinipetTransmog) return;
 
-        if (minipetStatus.poppedMinipetId && minipetStatus.poppedMinipetId.value() == item->model_id) 
-        {
-            minipetStatus.poppedMinipetId = std::nullopt;
+        const auto agent = GW::Agents::GetAgentByID(pak->agent_id);
+        if (!agent || !agent->GetIsLivingType()) return;
+        if (agent->GetAsAgentLiving()->player_number != pendingMinipetTransmog->agentToReplaceModelID) return;
+
+        if (std::chrono::steady_clock::now() - minipetStatus.lastPop > std::chrono::seconds(10)) {
+            pendingMinipetTransmog = std::nullopt;
             return;
         }
-
-        const auto now = std::chrono::steady_clock::now();
-        const auto msSinceLastPop = std::chrono::duration_cast<std::chrono::milliseconds>(now - minipetStatus.lastPop).count();
-
-        if (msSinceLastPop <= 10'000) return;
-        minipetStatus.lastPop = now;
-
-        if (!isGhostInTheBox)
-        {
-            minipetStatus.poppedMinipetId = item->model_id;
-            pendingMinipetTransmog = *potentialTransmog;
-        }
+        const auto transmog = pendingMinipetTransmog->npcTransmog;
+        minipetStatus.poppedMinipetId = pendingMinipetTransmog->itemToReplaceModelID;
+        minipetStatus.agentID = agent->agent_id;
+        pendingMinipetTransmog = std::nullopt;
+        TransmoAgent(agent->agent_id, transmog);
     });
+    GW::StoC::RegisterPostPacketCallback<GW::Packet::StoC::AgentRemove>(&AgentRemove_Entry,
+        [](GW::HookStatus* status, const GW::Packet::StoC::AgentRemove* packet) {
+            const std::scoped_lock callbackLock(skinChangerMutex);
+            if (!status->blocked && packet->agent_id == minipetStatus.agentID) {
+                minipetStatus.poppedMinipetId = std::nullopt;
+                minipetStatus.agentID = 0;
+            }
+        });
 }
 
 void SkinChanger::Update(float)
 {
-    if (GW::Map::GetInstanceType() == GW::Constants::InstanceType::Loading) 
-    {
+    const std::scoped_lock lock(skinChangerMutex);
+    if (GW::Map::GetInstanceType() == GW::Constants::InstanceType::Loading) {
         pendingMinipetTransmog = std::nullopt;
-        if (hasAgentAddHook) 
-        {
-            hasAgentAddHook = false;
-            GW::StoC::RemovePostCallback<GW::Packet::StoC::AgentAdd>(&AgentAdd_Entry);
-        }
+        refreshItems = true;
         return;
     }
-    if (!hasAgentAddHook) 
-    {
-        hasAgentAddHook = true;
-        // Use [this] instead of [&] for the same reason as the UseItem callback above.
-        GW::StoC::RegisterPostPacketCallback<GW::Packet::StoC::AgentAdd>(&AgentAdd_Entry, [this](GW::HookStatus* status, const GW::Packet::StoC::AgentAdd* pak) 
-        {
-            if (status->blocked || !pak->agent_type || !pendingMinipetTransmog) return;
-
-            const auto agent = GW::Agents::GetAgentByID(pak->agent_id);
-            if (!agent || !agent->GetIsLivingType()) return;
-            if (agent->GetAsAgentLiving()->player_number != pendingMinipetTransmog->agentToReplaceModelID) return;
-
-            TransmoAgent(agent->agent_id, pendingMinipetTransmog->npcTransmog);
-            pendingMinipetTransmog = std::nullopt;
-        });
+    if (pendingMinipetTransmog && std::chrono::steady_clock::now() - minipetStatus.lastPop > std::chrono::seconds(10)) {
+        pendingMinipetTransmog = std::nullopt;
+        minipetStatus.poppedMinipetId = std::nullopt;
     }
+    if (!refreshItems || !GW::Agents::GetControlledCharacter()) return;
+    const auto items = GW::Items::GetItemArray();
+    if (!items || !items->valid() || !items->m_buffer) return;
+    refreshItems = false;
+    std::vector<uint32_t> changedItems;
+    for (const auto item : *items) {
+        if (applyOverrideToItem(item)) changedItems.push_back(item->item_id);
+    }
+    // Notifications can dispatch other hooks, so do not retain item pointers or array iterators across them.
+    for (const auto itemID : changedItems) {
+        if (const auto item = GW::Items::GetItemById(itemID); item && NotifyItemChanged) {
+            NotifyItemChanged(item, nullptr);
+        }
+    }
+    std::erase_if(originalItems, [](const auto& entry) { return !GW::Items::GetItemById(entry.first); });
+}
+
+bool SkinChanger::CanTerminate()
+{
+    return !restorationPending.load() && AsyncStringDecoder::PendingCount() == 0;
 }
 
 void SkinChanger::SignalTerminate()
 {
+    const std::scoped_lock lock(skinChangerMutex);
     ToolboxPlugin::SignalTerminate();
 
     GW::StoC::RemovePostCallback<GW::Packet::StoC::InstanceLoadFile>(&InstanceLoadFile_Entry);
-    GW::StoC::RemovePostCallback<GW::Packet::StoC::ItemGeneral_FirstID>(&ItemGeneral_Entry);
-    GW::StoC::RemovePostCallback<GW::Packet::StoC::ItemGeneral_ReuseID>(&ItemGeneralReuse_Entry);
+    GW::StoC::RemoveCallback<GW::Packet::StoC::ItemGeneral_FirstID>(&ItemGeneral_Entry);
+    GW::StoC::RemoveCallback<GW::Packet::StoC::ItemGeneral_ReuseID>(&ItemGeneralReuse_Entry);
+    GW::UI::RemoveUIMessageCallback(&ItemUpdated_Entry, GW::UI::UIMessage::kItemUpdated);
     GW::UI::RemoveUIMessageCallback(&UseItem_Entry, GW::UI::UIMessage::kSendUseItem);
     GW::StoC::RemovePostCallback<GW::Packet::StoC::AgentAdd>(&AgentAdd_Entry);
+    GW::StoC::RemovePostCallback<GW::Packet::StoC::AgentRemove>(&AgentRemove_Entry);
     GW::Chat::DeleteCommand(&RestoreChatCmd_HookEntry);
     activeSkinChanger = nullptr;
+    pendingMinipetTransmog = std::nullopt;
+    if (!originalItems.empty()) {
+        restorationPending = true;
+        GW::GameThread::Enqueue([saved = std::move(originalItems)] {
+            const std::scoped_lock callbackLock(skinChangerMutex);
+            if (GW::Map::GetInstanceType() != GW::Constants::InstanceType::Loading) {
+                for (const auto& [id, original] : saved) {
+                    const auto item = GW::Items::GetItemById(id);
+                    if (!item || item->model_id != original.identity.modelID
+                        || !compareMods(original.identity.modifiers, item->mod_struct, item->mod_struct_size)
+                        || GetAppearance(item) != original.applied) continue;
+                    SetAppearance(item, original.original);
+                    if (NotifyItemChanged) NotifyItemChanged(item, nullptr);
+                }
+            }
+            restorationPending = false;
+        });
+    }
 }

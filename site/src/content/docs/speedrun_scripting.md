@@ -10,9 +10,11 @@ Dialogue triggers match decoded text without Guild Wars formatting tags. Item, a
 
 ## Use Skill actions
 
-**Use skill** supports a SkillID or a skillbar slot. Both forms wait for the game's cast-completion notification before advancing to the next action. Instant skills also need this confirmation. This keeps a sequence such as Target NPC → Use Skill → Talk with NPC → Send Dialog from treating a failed cast as successful.
+**Use skill** supports a SkillID or a skillbar slot. Both forms wait for Guild Wars to confirm that the matching character activated the requested skill. Instant skills also require their activation notification. Confirmation advances the script on the next update without an added ping delay; simply submitting a request or seeing the casting animation stop is not enough.
 
-Rejected or interrupted casts stop the affected script and appear in its log. A cast that never starts or finishes times out after 5–30 seconds, depending on its normal casting time. Loading another script or changing maps cancels any pending skill request. Missing skillbars and invalid slots fail safely.
+While confirmation is pending, SST checks the player and timeout once per measured ping, using the higher of the client's current and average ping. The interval is bounded between 50 ms and 5 seconds, with a 250 ms fallback when ping is unavailable. The timeout starts when the request is dispatched and allows twice the skill's normal activation-plus-aftercast time (up to 30 seconds), plus four ping intervals or one second, whichever is longer. A rising ping extends that allowance; a later decrease does not shorten it. These checks do not block the game thread.
+
+An interrupted cast, rejected request, or missing confirmation stops the affected script with a log message and releases its queued actions. It does not advance to dependent actions as if the cast succeeded. Loading another script or changing maps cancels pending requests; missing skillbars and invalid slots fail safely. Explicit Wait and Wait Until actions remain available for other game states.
 
 Use the updated Toolbox DLL together with DBBox: Toolbox's compatibility fixes refresh the game input frame and release simulated keys on the following game loop.
 

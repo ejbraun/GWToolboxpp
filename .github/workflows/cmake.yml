@@ -183,10 +183,15 @@ jobs:
       if: github.ref == 'refs/heads/master' && github.repository != 'gwdevhub/GWToolboxpp'
       shell: pwsh
       run: |
-        $manifest = Get-Content -LiteralPath "${{runner.workspace}}/GWToolboxpp/bin/RelWithDebInfo/GWToolboxdll.version.json" -Raw | ConvertFrom-Json
-        $tag = "gwtoolbox-v$($manifest.display_version)"
+        $artifactDir = "${{runner.workspace}}/GWToolboxpp/bin/RelWithDebInfo"
+        $manifest = Get-Content -LiteralPath "$artifactDir/GWToolboxdll.version.json" -Raw | ConvertFrom-Json
+        $displayVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo("$artifactDir/GWToolboxdll.dll").FileVersion
+        if ($displayVersion -notmatch '^\d+(?:\.\d+)+\.(\d+)$' -or [uint32]$Matches[1] -ne $manifest.version) {
+          throw "Toolbox DLL version '$displayVersion' does not match manifest revision '$($manifest.version)'"
+        }
+        $tag = "gwtoolbox-v$displayVersion"
         "tag_name=$tag" >> $env:GITHUB_OUTPUT
-        "version=$($manifest.display_version)" >> $env:GITHUB_OUTPUT
+        "version=$displayVersion" >> $env:GITHUB_OUTPUT
         $existing = git ls-remote --tags origin "refs/tags/$tag"
         if ($LASTEXITCODE -ne 0) { throw 'Could not query release tags' }
         $shouldRelease = [string]::IsNullOrWhiteSpace(($existing -join "`n")).ToString().ToLowerInvariant()
@@ -250,8 +255,8 @@ jobs:
         # (registered under module key `gwtoolbox`); GW Launcher Reforged pulls this build.
         # It is not an add_tb_plugin() target, so "Stage plugin artifacts" skips it. Its
         # CMake POST_BUILD now uses the shared manifest writer with the integer fork
-        # revision, upstream/fork display version, ABI and build ID. Publish that
-        # generated manifest and the cumulative fork patch notes alongside the DLL.
+        # revision, ABI and build ID; the display version stays in the DLL resource.
+        # Publish that manifest and the cumulative fork patch notes alongside the DLL.
         TB_DLL="${{runner.workspace}}/GWToolboxpp/bin/RelWithDebInfo/GWToolboxdll.dll"
         if [ -f "$TB_DLL" ]; then
           TB_MANIFEST="${TB_DLL%.dll}.version.json"

@@ -18,7 +18,7 @@ struct ItemChange
     std::string modelFileID = "0x";
 
     bool enableDyes = false;
-    std::array<GW::DyeColor, 4> dyes;
+    std::array<GW::DyeColor, 4> dyes{};
     uint8_t tint = 255;
 };
 
@@ -59,6 +59,7 @@ public:
 
     void Initialize(ImGuiContext* ctx, ImGuiAllocFns allocator_fns, HMODULE toolbox_dll) override;
     void SignalTerminate() override;
+    bool CanTerminate() override;
 
     void Update(float) override;
 
@@ -71,5 +72,5 @@ private:
     // Fixed: moved from public to private — this is an internal helper called only from
     // within the class (packet callbacks and instance-load hooks) and should not be part
     // of the public plugin interface.
-    void applyOverrideToItem(GW::Item* item) const;
+    bool applyOverrideToItem(GW::Item* item) const;
 };

@@ -71,11 +71,15 @@ public:
     void Terminate() override;
 
     bool triggerScripts(Trigger triggerType, std::function<bool(const Script&)> extraConditions = [](const Script&) { return true; }, bool checkConditions = true);
-    void loadFromIniFile(const ToolboxIni& ini);
+    bool loadFromIniFile(const ToolboxIni& ini);
+    bool loadFromBackup(const std::filesystem::path& path);
 
 private:
     static void OnDisplayDialogDecoded(void* context, const wchar_t* decoded);
     void CompleteDisplayDialogDecode(const wchar_t* decoded);
+    bool loadFromSettingsDoc(const SettingsDoc& doc, const ToolboxIni& legacy);
+    bool reportSettingsError(std::string error);
+    bool drawSettingsError();
     void clear();
     void refreshDisabledKeys();
 
@@ -88,6 +92,9 @@ private:
     int framesSinceLoadingFinished = 0;
     Hotkey clearScriptsKey{};
     bool terminating = false;
+    bool settingsLoaded = false;
+    std::filesystem::path settingsFolder;
+    std::string settingsLoadError;
     std::atomic_size_t pendingDisplayDialogDecodes = 0;
 
     // Not serialized, derived from scripts at runtime.

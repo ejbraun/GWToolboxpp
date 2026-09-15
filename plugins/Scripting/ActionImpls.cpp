@@ -462,11 +462,30 @@ struct SkillCastAction::CastState {
     GW::Constants::SkillID skillId = GW::Constants::SkillID::No_Skill;
     uint32_t agentId = 0;
     size_t slot = 0;
-    std::chrono::steady_clock::time_point startedAt = std::chrono::steady_clock::now();
-    std::chrono::duration<float> timeout{5.f};
+    std::chrono::steady_clock::time_point queuedAt = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point dispatchedAt{}, nextCheckAt{};
+    std::chrono::duration<float> castAllowance{};
+    std::chrono::milliseconds ping{250};
     std::atomic_bool active = true;
     std::atomic<Dispatch> dispatch = Dispatch::Pending;
     std::atomic<ActionStatus> result = ActionStatus::Running;
+
+    static std::chrono::milliseconds ReadPing()
+    {
+        struct LatencyFrameContext {
+            uint8_t unused[0x20];
+            uint32_t averagePing;
+            uint32_t unused24;
+            uint32_t currentPing;
+        };
+        static_assert(sizeof(LatencyFrameContext) == 0x2c);
+        // Match LatencyWidget's DnStat context, resolving it again because frames can be recreated.
+        const auto frame = GW::UI::GetFrameByLabel(L"DnStat");
+        const auto context = frame && frame->IsCreated() && !frame->IsBeingDestroyed()
+            ? static_cast<const LatencyFrameContext*>(GW::UI::GetFrameContext(frame)) : nullptr;
+        const auto measured = context ? std::max(context->currentPing, context->averagePing) : 0;
+        return std::chrono::milliseconds{std::clamp(measured ? measured : 250u, 50u, 5000u)};
+    }
 };
 
 SkillCastAction::~SkillCastAction()
@@ -504,15 +523,17 @@ void SkillCastAction::beginCast(const size_t slot)
     state->skillId = skill.skill_id;
     state->agentId = player->agent_id;
     state->slot = slot;
-    state->timeout = std::chrono::duration<float>{std::clamp(3.f + 2.f * (data->activation + data->aftercast), 5.f, 30.f)};
+    state->castAllowance = std::chrono::duration<float>{std::clamp(2.f * (data->activation + data->aftercast), 0.f, 30.f)};
 
-    // Skill Monitor uses these completion events too; polling player->skill can miss a short cast entirely.
+    // Short casts can evade player->skill polling; require the completion events also used by Skill Monitor.
     for (const auto message : {GW::UI::UIMessage::kAgentSkillActivated, GW::UI::UIMessage::kAgentSkillActivatedInstantly, GW::UI::UIMessage::kAgentSkillCancelled}) {
         GW::UI::RegisterUIMessageCallback(&state->hook, message,
-            [state](GW::HookStatus*, const GW::UI::UIMessage message, void* wparam, void*) {
+            [state](GW::HookStatus* status, const GW::UI::UIMessage message, void* wparam, void*) {
+                const auto dispatch = state->dispatch.load();
                 const auto packet = static_cast<GW::UI::UIPacket::kAgentSkillPacket*>(wparam);
-                if (!state->active || state->dispatch == CastState::Dispatch::Pending || !packet
-                    || packet->agent_id != state->agentId || packet->skill_id != state->skillId) return;
+                if (!state->active || (status && status->blocked)
+                    || (dispatch != CastState::Dispatch::Dispatching && dispatch != CastState::Dispatch::Accepted)
+                    || !packet || packet->agent_id != state->agentId || packet->skill_id != state->skillId) return;
                 auto expected = ActionStatus::Running;
                 state->result.compare_exchange_strong(expected,
                     message == GW::UI::UIMessage::kAgentSkillCancelled ? ActionStatus::Error : ActionStatus::Complete);
@@ -530,6 +551,9 @@ void SkillCastAction::beginCast(const size_t slot)
             state->dispatch = CastState::Dispatch::Rejected;
             return;
         }
+        state->ping = CastState::ReadPing();
+        state->dispatchedAt = std::chrono::steady_clock::now();
+        state->nextCheckAt = state->dispatchedAt + state->ping;
         state->dispatch = CastState::Dispatch::Dispatching;
         state->dispatch = GW::SkillbarMgr::UseSkill(static_cast<uint32_t>(state->slot), targetId)
             ? CastState::Dispatch::Accepted : CastState::Dispatch::Rejected;
@@ -540,22 +564,31 @@ ActionStatus SkillCastAction::isComplete() const
 {
     const auto state = castState;
     if (!state || !state->active) return ActionStatus::Error;
-    if (state->dispatch == CastState::Dispatch::Rejected || state->result == ActionStatus::Error) {
+    const auto dispatch = state->dispatch.load();
+    if (dispatch == CastState::Dispatch::Rejected || state->result == ActionStatus::Error) {
         logMessage(std::format("Use skill {} was rejected or interrupted.", static_cast<uint32_t>(state->skillId)));
         return ActionStatus::Error;
     }
-    if (state->dispatch == CastState::Dispatch::Accepted && state->result == ActionStatus::Complete) return ActionStatus::Complete;
-    if (std::chrono::steady_clock::now() - state->startedAt >= state->timeout) {
-        logMessage(std::format("Use skill {} timed out waiting for the game to cast it.", static_cast<uint32_t>(state->skillId)));
+    if (dispatch == CastState::Dispatch::Accepted && state->result == ActionStatus::Complete) return ActionStatus::Complete;
+    const auto now = std::chrono::steady_clock::now();
+    if (dispatch != CastState::Dispatch::Accepted) {
+        if (now - state->queuedAt < std::chrono::seconds{30}) return ActionStatus::Running;
+        logMessage(std::format("Use skill {} timed out before the request was dispatched.", static_cast<uint32_t>(state->skillId)));
         return ActionStatus::Error;
     }
-    if (state->dispatch != CastState::Dispatch::Accepted) return ActionStatus::Running;
-
+    if (now < state->nextCheckAt) return ActionStatus::Running;
     const auto player = GW::Agents::GetControlledCharacter();
-    const auto bar = GW::SkillbarMgr::GetPlayerSkillbar();
-    if (!player || player->agent_id != state->agentId || !bar || !bar->IsValid() || bar->agent_id != state->agentId
-        || bar->skills[state->slot].skill_id != state->skillId) return ActionStatus::Error;
+    if (!player || player->agent_id != state->agentId) return ActionStatus::Error;
 
+    const auto ping = CastState::ReadPing();
+    state->ping = std::max(state->ping, ping);
+    state->nextCheckAt = now + ping;
+    const auto timeout = state->castAllowance + std::max(std::chrono::milliseconds{1000}, 4 * state->ping);
+    if (now - state->dispatchedAt >= timeout) {
+        logMessage(std::format("Use skill {} timed out waiting for cast completion (ping allowance: {} ms).",
+            static_cast<uint32_t>(state->skillId), state->ping.count()));
+        return ActionStatus::Error;
+    }
     return ActionStatus::Running;
 }
 

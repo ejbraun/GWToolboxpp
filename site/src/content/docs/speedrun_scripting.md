@@ -18,6 +18,14 @@ An interrupted cast, rejected request, or missing confirmation stops the affecte
 
 Use the updated Toolbox DLL together with DBBox: Toolbox's compatibility fixes refresh the game input frame and release simulated keys on the following game loop.
 
+## Movement actions
+
+For **Move to** and **Move to distance from current target**, the former **Immediately finish** option is now **Finish when movement starts**. Existing script exports use the updated behavior automatically. SST sends the move immediately and advances when the character starts moving or is already within the destination's accuracy range; it does not wait for the full journey.
+
+If the character stays idle, SST retries the move at intervals based on the client's ping. Movement is checked every update, so success does not add a full ping of delay. The request times out after four ping intervals or one second, whichever is longer, measured from its first dispatch. Rising ping extends the allowance; falling ping only changes the retry interval. The same ping bounds and fallback described for skills apply.
+
+A rejected request or timeout stops the affected script with a log message. Clearing or replacing the script cancels its pending movement-start requests and retries. The other movement modes keep their existing arrival and retry behavior.
+
 ## Loading screens and action failures
 
 Actions pause during loading screens. Map changes clear the old running actions and trigger state; instance-load scripts resume after the new map and player are ready. Fork revision 3 fixes a loading-state race that could leave scripting paused until another map change.
@@ -27,6 +35,8 @@ Some actions wait for game events. If an expected event never arrives, a script 
 - **Repop minipet** allows up to 30 seconds for the item cooldown and the expected spawn event.
 - **Talk with NPC** allows up to 60 seconds for movement or a dialog, and stops when the target becomes invalid.
 - **Keyboard movement** stops waiting after 5 seconds if movement never starts, or immediately if the movement function is unavailable.
+
+**Stop Script** intentionally ends the current run, including when used inside conditional or random actions. It skips the remaining actions without reporting an error, releases active action state, and leaves the script available for its next trigger.
 
 Explicit **Wait** and **Wait Until** actions retain their configured behavior. A Wait Until condition that never becomes true can still intentionally hold a script. Check these conditions and critical sections when diagnosing a script that remains active.
 

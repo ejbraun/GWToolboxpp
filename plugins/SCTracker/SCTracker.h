@@ -340,6 +340,10 @@ private:
     void ResetVoteState();
     void CancelPendingVoteIfMatching(uint32_t utc_start);
     void FireVoteSubmit();
+    // Shared by DrawVotePopup's timer-expiry auto-close and OnGameSrvTransfer's zone-in auto-close:
+    // preserves an already-committed vote (see vote_pending_submit) so ProcessSync/FireVoteSubmit can
+    // still finish sending it, otherwise fully resets - no-op if the popup isn't open.
+    void CloseVotePopup();
 
     bool show_vote_popup = false;
     PostRunVoteKind pending_vote_kind = PostRunVoteKind::None;

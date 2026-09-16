@@ -1192,6 +1192,11 @@ void SCTracker::AddGamblingStoneDelta(const size_t party_index, const int32_t de
 
 void SCTracker::OnGameSrvTransfer()
 {
+    // Zoning while a stale MVP/Failure vote popup from an earlier run is still open blocks
+    // visibility of the map being zoned into - close it here, before FinalizeRun below gets a chance
+    // to open a fresh one for *this* transfer's own run.
+    CloseVotePopup();
+
     if (!run_active) {
         return;
     }
@@ -1802,6 +1807,22 @@ void SCTracker::OpenVote(const PostRunVoteKind kind, const uint32_t map_id, cons
     }
 }
 
+void SCTracker::CloseVotePopup()
+{
+    if (!show_vote_popup) {
+        return;
+    }
+    if (vote_pending_submit) {
+        // Committed before it closed - preserve everything else so ProcessSync can still correlate
+        // the run_id and FireVoteSubmit can still send it later.
+        show_vote_popup = false;
+        vote_popup_opened_tick = 0;
+    }
+    else {
+        ResetVoteState(); // nothing committed - nothing worth preserving
+    }
+}
+
 void SCTracker::ResetVoteState()
 {
     show_vote_popup = false;
@@ -1988,15 +2009,7 @@ void SCTracker::DrawVotePopup()
     const uint64_t now = GetTickCount64();
     const bool timer_active = vote_popup_opened_tick != 0 && (now - vote_popup_opened_tick) < kVoteWindowMs;
     if (vote_popup_opened_tick != 0 && !timer_active) {
-        if (vote_pending_submit) {
-            // Committed before the window closed - preserve everything else so ProcessSync can
-            // still correlate the run_id and FireVoteSubmit can still send it later.
-            show_vote_popup = false;
-            vote_popup_opened_tick = 0;
-        }
-        else {
-            ResetVoteState(); // nothing committed - nothing worth preserving
-        }
+        CloseVotePopup();
         return;
     }
 

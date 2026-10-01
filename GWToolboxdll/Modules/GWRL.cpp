@@ -11,7 +11,7 @@ template<> struct glz::meta<Gwrl::Message> {
     template<class T> static bool skip_if(const T& value, const std::string_view key, const glz::meta_context&)
     {
         if constexpr (std::is_same_v<T, std::vector<Gwrl::Artifact>>) return key == "artifacts" && value.empty();
-        return false;
+        else return false;
     }
 };
 

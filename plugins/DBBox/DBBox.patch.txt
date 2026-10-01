@@ -48,3 +48,6 @@
 - Confirm SST movement starts before advancing, with ping-based retries and cancellation when scripts are cleared or replaced.
 - Treat SST Stop Script as an intentional stop without logging an action failure, including inside conditional and random actions.
 - Fix the Skin Changer startup crash caused by the item-refresh signature check.
+
+## v10 - 2026-09-15
+- Retry checked SST skill, movement, NPC-interaction and minipet actions once after failure; retry only the failed action inside conditional or random blocks and cancel superseded queued requests.

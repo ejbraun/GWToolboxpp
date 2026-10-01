@@ -40,6 +40,7 @@
 #include <GWToolbox.h>
 #include <Logger.h>
 #include <Utils/GuiUtils.h>
+#include <Utils/GWCACompatibility.h>
 
 #include <Constants/EncStrings.h>
 #include <Modules/ChatCommands.h>
@@ -413,7 +414,7 @@ namespace {
     {
         GW::Hook::EnterHook();
         // If a channel was given in the UI message, set it now.
-        if (message->message_id == GW::UI::UIMessage::kAppendMessageToChat && lParam) {
+        if (message->message_id == GWCACompatibility::NativeUIMessage(GW::UI::UIMessage::kAppendMessageToChat) && lParam) {
             const auto frame = GW::UI::GetFrameById(message->frame_id);
             uint32_t control_action = 0xff;
             // Map tab number > key for the ui message

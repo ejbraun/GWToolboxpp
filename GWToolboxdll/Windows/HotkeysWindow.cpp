@@ -217,7 +217,7 @@ namespace {
         if (!c || !c->player_name[0]) {
             return false;
         }
-        GW::Player* me = GW::PlayerMgr::GetPlayerByID(c->player_number);
+        const auto me = GW::PlayerMgr::GetPlayerByID();
         if (!me || !me->primary || me->primary > std::to_underlying(GW::Constants::Profession::Dervish)) {
             return false;
         }

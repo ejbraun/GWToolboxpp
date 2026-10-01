@@ -1,5 +1,7 @@
 #include "stdafx.h"
 
+#include <Utils/GWCACompatibility.h>
+
 #include <GWCA/Context/CharContext.h>
 #include <GWCA/Context/PartyContext.h>
 #include <GWCA/Context/WorldContext.h>
@@ -421,7 +423,7 @@ namespace GW {
         const wchar_t* GetAccountEmail()
         {
             const auto c = GetCharContext();
-            return c ? c->player_email : nullptr;
+            return c ? GWCACompatibility::PlayerEmail(*c) : nullptr;
         }
 
         const UUID* GetPortalAccountUuid()

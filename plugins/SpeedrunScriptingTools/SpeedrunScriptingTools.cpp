@@ -1201,7 +1201,7 @@ void SpeedrunScriptingTools::Update(float delta)
                 currentActions.erase(currentActions.begin(), currentActions.begin() + 1);
             }
             else if (currentAction.hasBeenStarted()) {
-                switch (currentAction.isComplete()) {
+                switch (currentAction.checkCompletion()) {
                     case ActionStatus::Running:
                         break;
                     case ActionStatus::CompleteAndEnteringCriticalSection:

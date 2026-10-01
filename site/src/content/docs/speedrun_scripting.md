@@ -14,7 +14,7 @@ Dialogue triggers match decoded text without Guild Wars formatting tags. Item, a
 
 While confirmation is pending, SST checks the player and timeout once per measured ping, using the higher of the client's current and average ping. The interval is bounded between 50 ms and 5 seconds, with a 250 ms fallback when ping is unavailable. The timeout starts when the request is dispatched and allows twice the skill's normal activation-plus-aftercast time (up to 30 seconds), plus four ping intervals or one second, whichever is longer. A rising ping extends that allowance; a later decrease does not shorten it. These checks do not block the game thread.
 
-An interrupted cast, rejected request, or missing confirmation stops the affected script with a log message and releases its queued actions. It does not advance to dependent actions as if the cast succeeded. Loading another script or changing maps cancels pending requests; missing skillbars and invalid slots fail safely. Explicit Wait and Wait Until actions remain available for other game states.
+An interrupted cast, rejected request, or missing confirmation gives the skill action one additional attempt. If that attempt also fails, SST stops the affected script with a log message and releases its queued actions. It does not advance to dependent actions as if the cast succeeded. Loading another script or changing maps cancels pending requests; missing skillbars and invalid slots fail safely. Explicit Wait and Wait Until actions remain available for other game states.
 
 Use the updated Toolbox DLL together with DBBox: Toolbox's compatibility fixes refresh the game input frame and release simulated keys on the following game loop.
 
@@ -24,17 +24,19 @@ For **Move to** and **Move to distance from current target**, the former **Immed
 
 If the character stays idle, SST retries the move at intervals based on the client's ping. Movement is checked every update, so success does not add a full ping of delay. The request times out after four ping intervals or one second, whichever is longer, measured from its first dispatch. Rising ping extends the allowance; falling ping only changes the retry interval. The same ping bounds and fallback described for skills apply.
 
-A rejected request or timeout stops the affected script with a log message. Clearing or replacing the script cancels its pending movement-start requests and retries. The other movement modes keep their existing arrival and retry behavior.
+A rejected request or timeout gives the movement-start action one additional attempt, using the same ping-based checks and timeout. If the second attempt fails, SST stops the affected script with a log message. Clearing or replacing the script cancels its pending movement-start requests and retries. The other movement modes keep their existing arrival and retry behavior.
 
 ## Loading screens and action failures
 
 Actions pause during loading screens. Map changes clear the old running actions and trigger state; instance-load scripts resume after the new map and player are ready. Fork revision 3 fixes a loading-state race that could leave scripting paused until another map change.
 
-Some actions wait for game events. If an expected event never arrives, a script can otherwise keep later scripts waiting indefinitely. These failures now stop the affected script, release its active action state and identify the failed action in the script log:
+Some actions wait for game events. If an expected event never arrives, a script can otherwise keep later scripts waiting indefinitely. SST retries these checked actions once before stopping the affected script and identifying the failed action in the script log. Each attempt keeps the existing timeout:
 
 - **Repop minipet** allows up to 30 seconds for the item cooldown and the expected spawn event.
 - **Talk with NPC** allows up to 60 seconds for movement or a dialog, and stops when the target becomes invalid.
 - **Keyboard movement** stops waiting after 5 seconds if movement never starts, or immediately if the movement function is unavailable.
+
+The retry belongs to the individual action in that script run. In conditional and random blocks, only the failed action restarts; earlier actions and branch selection are preserved. Failed-attempt cleanup removes its event listeners and cancels pending requests before retrying. A new script run gets a fresh retry allowance. Actions without completion checks do not gain automatic retries.
 
 **Stop Script** intentionally ends the current run, including when used inside conditional or random actions. It skips the remaining actions without reporting an error, releases active action state, and leaves the script available for its next trigger.
 

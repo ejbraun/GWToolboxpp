@@ -1,5 +1,7 @@
 #include "stdafx.h"
 
+#include <Utils/GWCACompatibility.h>
+
 #include <GWCA/Constants/Constants.h>
 #include <GWCA/Constants/Skills.h>
 
@@ -328,6 +330,22 @@ namespace {
         GW::Hook::EnterHook();
 
         compass_context = message->wParam ? *(CompassContext**)message->wParam : nullptr;
+        if (message->message_id == GWCACompatibility::NativeUIMessage(GW::UI::UIMessage::kQuestAdded)
+            || message->message_id == GWCACompatibility::NativeUIMessage(GW::UI::UIMessage::kClientActiveQuestChanged)
+            || message->message_id == GWCACompatibility::NativeUIMessage(GW::UI::UIMessage::kServerActiveQuestChanged)
+            || message->message_id == GWCACompatibility::NativeUIMessage(GW::UI::UIMessage::kUnknownQuestRelated)) {
+            if (!hide_compass_quest_marker) {
+                OnCompassFrame_UICallback_Ret(message, wParam, lParam);
+            }
+            else {
+                const auto prev = message->message_id;
+                message->message_id = GWCACompatibility::NativeUIMessage(GW::UI::UIMessage::kQuestRemoved);
+                OnCompassFrame_UICallback_Ret(message, wParam, lParam);
+                message->message_id = prev;
+            }
+            GW::Hook::LeaveHook();
+            return;
+        }
         switch (message->message_id) {
             case GW::UI::UIMessage::kFrameMessage_0x44: {
                 if (OverrideCompassVisibility()) {
@@ -356,20 +374,6 @@ namespace {
             case GW::UI::UIMessage::kSetLayout:
                 OnCompassFrame_UICallback_Ret(message, wParam, lParam);
                 compass_position_dirty = true; // Forces a recalculation
-                break;
-            case GW::UI::UIMessage::kQuestAdded:
-            case GW::UI::UIMessage::kClientActiveQuestChanged:
-            case GW::UI::UIMessage::kServerActiveQuestChanged:
-            case GW::UI::UIMessage::kUnknownQuestRelated:
-                if (!hide_compass_quest_marker) {
-                    OnCompassFrame_UICallback_Ret(message, wParam, lParam);
-                }
-                else {
-                    const auto prev = message->message_id;
-                    message->message_id = GW::UI::UIMessage::kQuestRemoved;
-                    OnCompassFrame_UICallback_Ret(message, wParam, lParam);
-                    message->message_id = prev;
-                }
                 break;
             default:
                 if (compass_context && hide_flagging_controls) {

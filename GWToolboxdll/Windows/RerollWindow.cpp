@@ -88,19 +88,13 @@ namespace {
         return c ? c->player_party : nullptr;
     }
 
-    uint32_t GetPlayerNumber()
-    {
-        const auto c = GW::GetCharContext();
-        return c ? c->player_number : 0;
-    }
-
     const wchar_t* GetNextPartyLeader()
     {
         const auto player_party = GetPlayerParty();
         if (!player_party || !player_party->players.valid() || player_party->players.size() < 2) {
             return nullptr;
         }
-        const uint32_t player_number = GetPlayerNumber();
+        const auto player_number = GW::PlayerMgr::GetPlayerNumber();
         for (size_t i = 0; i < player_party->players.size(); i++) {
             if (player_party->players[i].login_number == player_number) {
                 continue;

@@ -1177,6 +1177,7 @@ void GoToTargetAction::serialize(OutputStream& stream) const
 void GoToTargetAction::initialAction()
 {
     Action::initialAction();
+    requestActive = std::make_shared<std::atomic_bool>(true);
 
     started_at = std::chrono::steady_clock::now();
     dialogHasPoppedUp = false;
@@ -1189,12 +1190,15 @@ void GoToTargetAction::initialAction()
         result.first->second.push_back(&dialogHasPoppedUp);
     }
 
-    GW::GameThread::Enqueue([id = target_id] {
+    GW::GameThread::Enqueue([active = finishCondition == GoToTargetFinishCondition::None ? nullptr : requestActive, id = target_id] {
+        if (active && !*active) return;
         if (const auto agent = GW::Agents::GetAgentByID(id)) GW::Agents::InteractAgent(agent);
     });
 }
 void GoToTargetAction::finalAction()
 {
+    if (requestActive) *requestActive = false;
+    requestActive.reset();
     for (auto it = gotoTargetDialogPoppedUp.begin(); it != gotoTargetDialogPoppedUp.end();) {
         std::erase(it->second, &dialogHasPoppedUp);
         it = it->second.empty() ? gotoTargetDialogPoppedUp.erase(it) : std::next(it);
@@ -1578,7 +1582,7 @@ ActionStatus ConditionedAction::isComplete() const
 
     if (first)
     {
-        const auto status = first->isComplete();
+        const auto status = first->checkCompletion();
         switch (status)
         {
             case ActionStatus::Running:
@@ -1771,6 +1775,7 @@ void RepopMinipetAction::serialize(OutputStream& stream) const
 void RepopMinipetAction::initialAction()
 {
     Action::initialAction();
+    requestActive = std::make_shared<std::atomic_bool>(true);
 
     agentHasSpawned = false;
     hasUsedItem = false;
@@ -1783,6 +1788,8 @@ void RepopMinipetAction::initialAction()
 }
 void RepopMinipetAction::finalAction()
 {
+    if (requestActive) *requestActive = false;
+    requestActive.reset();
     for (auto it = repopMinipets.begin(); it != repopMinipets.end();) {
         std::erase(it->second, &agentHasSpawned);
         it = it->second.empty() ? repopMinipets.erase(it) : std::next(it);
@@ -1806,7 +1813,8 @@ ActionStatus RepopMinipetAction::isComplete() const
         const auto item = FindMatchingItem(itemModelId);
         if (!item) return ActionStatus::Error;
         const auto needsToUnpop = instanceInfo.hasMinipetPopped();
-        GW::GameThread::Enqueue([needsToUnpop, id = item->item_id]() -> void {
+        GW::GameThread::Enqueue([active = requestActive, needsToUnpop, id = item->item_id]() -> void {
+            if (!*active) return;
             if (const auto item = GW::Items::GetItemById(id)) {
                 if (needsToUnpop) GW::Items::UseItem(item);
                 GW::Items::UseItem(item);
@@ -2468,6 +2476,7 @@ SideWalk_pt SideWalk_Func = 0;
 void KeyboardMoveAction::initialAction()
 {
     Action::initialAction();
+    requestActive = std::make_shared<std::atomic_bool>(true);
     startedWalking = false;
     started_at = std::chrono::steady_clock::now();
 
@@ -2483,7 +2492,8 @@ void KeyboardMoveAction::initialAction()
     {
         return;
     }
-    GW::GameThread::Enqueue([playerPos = player->pos, direction = targetPosition - player->pos, movementDirection = movementDirection]() mutable {
+    GW::GameThread::Enqueue([active = requestActive, playerPos = player->pos, direction = targetPosition - player->pos, movementDirection = movementDirection]() mutable {
+        if (!*active) return;
         auto normalizedDirection = GW::Normalize(direction);
         const int forwardsFlag = movementDirection == MovementDirection::Backwards ? -1 : 0;
         const int sideWaysFlag = movementDirection == MovementDirection::Right ? 1 : (movementDirection == MovementDirection::Left ? -1 : 0);
@@ -2491,6 +2501,12 @@ void KeyboardMoveAction::initialAction()
     });
 }
 
+void KeyboardMoveAction::finalAction()
+{
+    if (requestActive) *requestActive = false;
+    requestActive.reset();
+    Action::finalAction();
+}
 ActionStatus KeyboardMoveAction::isComplete() const
 {
     const auto player = GW::Agents::GetControlledCharacter();
@@ -2616,7 +2632,7 @@ ActionStatus RandomAction::isComplete() const
 {
     if (!currentAction) return ActionStatus::Complete;
 
-    switch (const auto status = currentAction->isComplete())
+    switch (const auto status = currentAction->checkCompletion())
     {
         case ActionStatus::Running:
             return ActionStatus::Running;

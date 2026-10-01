@@ -30,6 +30,7 @@
 #include <Utils/GameWorldCompositor.h>
 #include <Utils/PropSurfaceIndex.h>
 #include <Utils/GuiUtils.h>
+#include <Utils/GWCACompatibility.h>
 #include <Utils/TeamBuild.h>
 
 #include <Modules/CameraUnlockModule.h>
@@ -395,6 +396,20 @@ namespace {
             return true;
         }
 
+        const auto client = GetModuleHandleW(nullptr);
+        const auto* client_bytes = reinterpret_cast<const BYTE*>(client);
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(client_bytes);
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(client_bytes + dos->e_lfanew);
+        wchar_t client_path[MAX_PATH]{};
+        const auto path_length = GetModuleFileNameW(client, client_path, _countof(client_path));
+        const auto needs_client_compatibility = nt->FileHeader.TimeDateStamp == 1790796237
+            && nt->OptionalHeader.SizeOfImage == 0xf4c000;
+        if (needs_client_compatibility && (!path_length || path_length >= _countof(client_path)
+            || Sha256HexFile(client_path) != "8e50edfb83515fabfec50bfd9d17968e8635a39b4c3e796e311bbc5cd15e5878")) {
+            Log::Log("[LoadGWCADll] September 30 client fingerprint validation failed");
+            return false;
+        }
+
         auto* module_bytes = reinterpret_cast<BYTE*>(module);
         for (auto& patch : patches) {
             const auto* instruction = module_bytes + patch.rva;
@@ -422,7 +437,7 @@ namespace {
             ++protected_count;
         }
 
-        if (!protected_count) return true;
+        if (!protected_count) return !needs_client_compatibility || GWCACompatibility::Initialize(module);
 
         for (const auto& patch : patches) {
             if (!patch.needs_write) continue;
@@ -448,7 +463,7 @@ namespace {
         if (!finalization_succeeded) return false;
 
         Log::Log("[LoadGWCADll] applied %zu GWCA hot-patches", protected_count);
-        return true;
+        return !needs_client_compatibility || GWCACompatibility::Initialize(module);
     }
 
     bool IsValidGWCADll(const std::filesystem::path& dll_path_str, [[maybe_unused]] const EmbeddedResource& resource_dll)
@@ -575,6 +590,7 @@ namespace {
 
     bool UnloadGWCADll()
     {
+        GWCACompatibility::Terminate();
         ASSERT(!gwcamodule || FreeLibrary(gwcamodule));
         return true;
     }

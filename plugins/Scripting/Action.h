@@ -73,20 +73,33 @@ public:
     }
     virtual ~Action(){};
     virtual ActionType type() const = 0;
-    virtual void initialAction() { m_hasBeenStarted = true; }
+    virtual void initialAction() { m_hasBeenStarted = true; m_hasRetried = false; }
     virtual void finalAction() { m_hasBeenStarted = false; }
     virtual ActionStatus isComplete() const { return ActionStatus::Complete; }
     virtual void drawSettings() = 0;
     virtual void serialize(OutputStream& stream) const { stream << "A" << type();}
     virtual ActionBehaviourFlags behaviour() const { return ActionBehaviourFlag::Default; }
     bool hasBeenStarted() const { return m_hasBeenStarted; }
+    ActionStatus checkCompletion()
+    {
+        const auto status = isComplete();
+        if (status != ActionStatus::Error || !m_hasBeenStarted || m_hasRetried || !canRetry()) return status;
+
+        finalAction();
+        initialAction();
+        // initialAction resets per-run state; keep this retry spent until the next script run.
+        m_hasRetried = true;
+        return ActionStatus::Running;
+    }
 
 protected:
+    virtual bool canRetry() const { return false; }
     int drawId() const { return m_drawId; }
 
 private:
     int m_drawId = 0;
     bool m_hasBeenStarted{false};
+    bool m_hasRetried = false;
 };
 
 using ActionPtr = std::shared_ptr<Action>;

@@ -1,5 +1,7 @@
 #include "stdafx.h"
 
+#include <Utils/GWCACompatibility.h>
+
 #include <GWCA/Utilities/Hooker.h>
 #include <GWCA/Utilities/Scanner.h>
 
@@ -736,10 +738,14 @@ namespace {
             return false;
         }
         file_ids = *(wchar_t***)addr;
-        // wchar_t *[18][99] s_fileId
+        const auto get_language_files = reinterpret_cast<wchar_t**(__cdecl*)(uint32_t)>(GW::Scanner::ToFunctionStart(addr));
+        if (!get_language_files) return false;
+        const auto file_count = get_language_files(1) - file_ids;
+        if (file_count <= 0) return false;
+        // s_fileId has 18 language rows; the client update expanded each row from 99 files to 100.
         for (size_t language_id = 0; language_id < 18; language_id++) {
-            wchar_t** language_files = &file_ids[language_id * 99];
-            for (size_t file_idx = 0; file_idx < 99; file_idx++) {
+            auto** language_files = get_language_files(static_cast<uint32_t>(language_id));
+            for (ptrdiff_t file_idx = 0; file_idx < file_count; file_idx++) {
                 const auto file_name = language_files[file_idx];
                 if (!(file_name && *file_name)) continue;
                 if (!asset.readFromDat(file_name)) return false;
@@ -943,25 +949,25 @@ namespace {
         static bool game_master_mode = false;
         if (ImGui::Checkbox("Game Master Mode", &game_master_mode)) {
             if (game_master_mode) {
-                GW::GetCharContext()->player_flags |= 0x8;
+                GWCACompatibility::PlayerFlags(*GW::GetCharContext()) |= 0x8;
             }
             else {
-                GW::GetCharContext()->player_flags ^= 0x8;
+                GWCACompatibility::PlayerFlags(*GW::GetCharContext()) ^= 0x8;
             }
         }
         if (ImGui::Button("Open Text Dev Window")) {
             GW::GameThread::Enqueue([] {
-                GW::GetCharContext()->player_flags |= 0x8;
+                GWCACompatibility::PlayerFlags(*GW::GetCharContext()) |= 0x8;
                 GW::UI::UIPacket::kKeyAction packet;
                 packet.gw_key = (GW::UI::ControlAction)0x25;
                 packet.state_flags = 0x6; // Ctrl and shift
                 GW::UI::SendFrameUIMessage(GW::UI::GetChildFrame(GW::UI::GetFrameByLabel(L"Game"), 6), GW::UI::UIMessage::kKeyDown, &packet);
-                GW::GetCharContext()->player_flags ^= 0x8;
+                GWCACompatibility::PlayerFlags(*GW::GetCharContext()) ^= 0x8;
             });
         }
         if (ImGui::Button("Open GM Start Menu?")) {
             GW::GameThread::Enqueue([] {
-                GW::GetCharContext()->player_flags |= 0x8;
+                GWCACompatibility::PlayerFlags(*GW::GetCharContext()) |= 0x8;
                 GW::UI::SendUIMessage((GW::UI::UIMessage)0x1000008a, 0, 0);
                 // GW::GetCharContext()->player_flags ^= 0x8;
             });

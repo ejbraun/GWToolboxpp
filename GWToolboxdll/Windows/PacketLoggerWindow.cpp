@@ -19,6 +19,7 @@
 
 #include <Logger.h>
 #include <Utils/GuiUtils.h>
+#include <Utils/GWCACompatibility.h>
 
 #include <Modules/Resources.h>
 #include <Windows/PacketLoggerWindow.h>
@@ -166,6 +167,7 @@ namespace {
     volatile bool running;
 
     StoCHandlerArray game_server_handler;
+    uint32_t packet_count = 0;
     constexpr size_t packet_max = 512; // Increase if number of StoC packets exceeds this.
     bool ignored_packets[packet_max] = {false};
     bool blocked_packets[packet_max] = {false};
@@ -248,6 +250,7 @@ namespace {
 
         // Copy gs handler array; we're going to swap out m_buffer.
         memcpy(&game_server_handler, original_handler_arr, sizeof(*original_handler_arr));
+        packet_count = std::min(GWCACompatibility::LegacyPacketCount(game_server_handler.size()), static_cast<uint32_t>(packet_max));
 
 
         ignored_packets[12] = true;
@@ -546,6 +549,9 @@ void PacketLoggerWindow::CtoSHandler(const GW::HookStatus*, void* packet) const
 
 void PacketLoggerWindow::PacketHandler(GW::HookStatus* status, GW::Packet::StoC::PacketBase* packet) const
 {
+    if (packet->header >= packet_count) {
+        return;
+    }
     if (blocked_packets[packet->header]) {
         status->blocked = true;
     }
@@ -557,7 +563,8 @@ void PacketLoggerWindow::PacketHandler(GW::HookStatus* status, GW::Packet::StoC:
         return;
     }
     //if (packet->header == 95) return true;
-    if (packet->header >= game_server_handler.size()) {
+    const auto native_header = GWCACompatibility::NativePacketHeader(packet->header);
+    if (native_header >= game_server_handler.size()) {
         return;
     }
     if (auto_ignore_packets) {
@@ -567,7 +574,7 @@ void PacketLoggerWindow::PacketHandler(GW::HookStatus* status, GW::Packet::StoC:
         return;
     }
 
-    const StoCHandler handler = game_server_handler.at(packet->header);
+    const auto handler = game_server_handler.at(native_header);
     auto packet_raw = reinterpret_cast<uint8_t*>(packet);
 
     uint8_t** bytes = &packet_raw;
@@ -741,18 +748,18 @@ void PacketLoggerWindow::Draw(IDirect3DDevice9*)
     ImGui::CheckboxWithHelp("Log NPC Dialogs", &log_npc_dialogs, "Log encoded strings and their translated output to debug console");
     if (ImGui::CollapsingHeader("Ignored Packets")) {
         if (ImGui::Button("Select All")) {
-            for (size_t i = 0; i < game_server_handler.size(); i++) {
+            for (size_t i = 0; i < packet_count; i++) {
                 ignored_packets[i] = true;
             }
         }
         ImGui::SameLine();
         if (ImGui::Button("Deselect All")) {
-            for (size_t i = 0; i < game_server_handler.size(); i++) {
+            for (size_t i = 0; i < packet_count; i++) {
                 ignored_packets[i] = false;
             }
         }
         float offset = 0.0f;
-        for (size_t i = 0; i < game_server_handler.size(); i++) {
+        for (size_t i = 0; i < packet_count; i++) {
             if (i % 12 == 0) {
                 offset = 0.0f;
                 ImGui::NewLine();
@@ -766,24 +773,24 @@ void PacketLoggerWindow::Draw(IDirect3DDevice9*)
                 ignored_packets[i] = p;
             }
             if (ImGui::IsItemHovered()) {
-                TooltipHandlerInfo(game_server_handler[i]);
+                TooltipHandlerInfo(game_server_handler[GWCACompatibility::NativePacketHeader(i)]);
             }
         }
     }
     if (ImGui::CollapsingHeader("Blocked Packets")) {
         if (ImGui::Button("Select All")) {
-            for (size_t i = 0; i < game_server_handler.size(); i++) {
+            for (size_t i = 0; i < packet_count; i++) {
                 blocked_packets[i] = true;
             }
         }
         ImGui::SameLine();
         if (ImGui::Button("Deselect All")) {
-            for (size_t i = 0; i < game_server_handler.size(); i++) {
+            for (size_t i = 0; i < packet_count; i++) {
                 blocked_packets[i] = false;
             }
         }
         float offset = 0.0f;
-        for (size_t i = 0; i < game_server_handler.size(); i++) {
+        for (size_t i = 0; i < packet_count; i++) {
             if (i % 12 == 0) {
                 offset = 0.0f;
                 ImGui::NewLine();
@@ -797,7 +804,7 @@ void PacketLoggerWindow::Draw(IDirect3DDevice9*)
                 blocked_packets[i] = p;
             }
             if (ImGui::IsItemHovered()) {
-                TooltipHandlerInfo(game_server_handler[i]);
+                TooltipHandlerInfo(game_server_handler[GWCACompatibility::NativePacketHeader(i)]);
             }
         }
     }
@@ -927,7 +934,7 @@ void PacketLoggerWindow::Disable()
     if (!logger_enabled || !game_server_handler.m_buffer) {
         return;
     }
-    for (size_t i = 0; i < game_server_handler.size(); i++) {
+    for (size_t i = 0; i < packet_count; i++) {
         GW::StoC::RemoveCallback(i, &hook_entry);
     }
     logger_enabled = false;
@@ -941,7 +948,7 @@ void PacketLoggerWindow::Enable()
     if (logger_enabled) {
         return;
     }
-    for (size_t i = 0; i < game_server_handler.size(); i++) {
+    for (size_t i = 0; i < packet_count; i++) {
         GW::StoC::RegisterPacketCallback(
             &hook_entry, i, [this](GW::HookStatus* status, GW::Packet::StoC::PacketBase* packet) -> void {
                 PacketHandler(status, packet);

@@ -17,6 +17,7 @@
 #include <GWCA/Utilities/Hook.h>
 #include <GWCA/Managers/UIMgr.h>
 
+#include <atomic>
 #include <chrono>
 #include <map>
 #include <unordered_set>
@@ -51,6 +52,9 @@ public:
     void serialize(OutputStream&) const final;
     ActionBehaviourFlags behaviour() const final { return ActionBehaviourFlag::CanBeRunInOutpost; }
 
+protected:
+    bool canRetry() const override { return moveBehaviour == MoveToBehaviour::ImmediateFinish; }
+
 private:
     GW::GamePos pos{};
     float accuracy = GW::Constants::Range::Adjacent;
@@ -69,6 +73,9 @@ public:
     void drawSettings() final;
     void serialize(OutputStream&) const final;
     ActionBehaviourFlags behaviour() const final { return ActionBehaviourFlag::CanBeRunInOutpost; }
+
+protected:
+    bool canRetry() const override { return moveBehaviour == MoveToBehaviour::ImmediateFinish; }
 
 private:
     float accuracy = 0.f;
@@ -106,6 +113,7 @@ public:
     ActionStatus isComplete() const override;
 
 protected:
+    bool canRetry() const override { return true; }
     void beginCast(size_t slot);
 
 private:
@@ -245,12 +253,16 @@ public:
     void serialize(OutputStream&) const final;
     ActionBehaviourFlags behaviour() const final { return ActionBehaviourFlag::CanBeRunInOutpost; }
 
+protected:
+    bool canRetry() const override { return finishCondition != GoToTargetFinishCondition::None; }
+
 private:
     GoToTargetFinishCondition finishCondition = GoToTargetFinishCondition::DialogOpen;
 
     GW::AgentID target_id = 0;
     std::chrono::steady_clock::time_point started_at{};
     mutable bool dialogHasPoppedUp = false;
+    std::shared_ptr<std::atomic_bool> requestActive;
 };
 
 class WaitAction : public Action {
@@ -339,6 +351,9 @@ public:
     void serialize(OutputStream&) const final;
     ActionBehaviourFlags behaviour() const final { return ActionBehaviourFlag::CanBeRunInOutpost; }
 
+protected:
+    bool canRetry() const override { return true; }
+
 private:
     int itemModelId = 36651;
     uint16_t agentModelId = 350;
@@ -347,6 +362,7 @@ private:
     mutable bool agentHasSpawned = false;
     mutable bool hasUsedItem = false;
     std::chrono::steady_clock::time_point started_at{};
+    std::shared_ptr<std::atomic_bool> requestActive;
 };
 
 class PingHardModeAction : public Action {
@@ -599,16 +615,21 @@ public:
     KeyboardMoveAction(InputStream&);
     ActionType type() const final { return ActionType::KeyboardMove; }
     void initialAction() final;
+    void finalAction() final;
     ActionStatus isComplete() const final;
     void drawSettings() final;
     void serialize(OutputStream&) const final;
     ActionBehaviourFlags behaviour() const final { return ActionBehaviourFlag::CanBeRunInOutpost; }
+
+protected:
+    bool canRetry() const override { return true; }
 
 private:
     GW::GamePos targetPosition{};
     MovementDirection movementDirection = MovementDirection::Right;
     mutable bool startedWalking = false;
     std::chrono::steady_clock::time_point started_at{};
+    std::shared_ptr<std::atomic_bool> requestActive;
 };
 
 class RandomAction : public Action {

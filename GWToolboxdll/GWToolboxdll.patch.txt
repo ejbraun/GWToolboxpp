@@ -36,3 +36,14 @@
 
 ## v7 - 2026-09-15
 - Fix extra spaces and other unwanted characters in Guild Wars chat when the Mouse Settings cursor fix is enabled.
+
+## v8 - 2026-09-30
+- Add temporary compatibility with the September 30 Guild Wars client update, fixing the GWCA packet-handler assertion during loading after injection.
+- Translate changed packet and UI message IDs so existing Toolbox callbacks, chat handling, inventory actions and map travel use the updated client IDs.
+- Correct character-context offsets used for map, district, language, player identity, player flags and account email.
+- Restore hotkey keybind activation and correct party-leader selection during reroll by using the updated player-number lookup.
+- Use updated quest-message IDs in the native compass hook so hiding compass quest markers continues to work.
+- Correct packet logger schema lookups and packet selection for the updated native handler table.
+- Fix an item-tooltip crash when reading salvage materials from the updated item-formula table.
+- Follow the client's updated language-file table size when exporting decoded string files from the Info window.
+- Retry checked SST skill, movement, NPC-interaction and minipet actions once after failure, including actions inside conditional or random blocks, and cancel superseded queued requests.

@@ -742,7 +742,7 @@ namespace {
         if (!get_language_files) return false;
         const auto file_count = get_language_files(1) - file_ids;
         if (file_count <= 0) return false;
-        // s_fileId has 18 language rows; the client update expanded each row from 99 files to 100.
+        // s_fileId has 18 language rows; derive the file count because client updates have expanded it from 99 to 100 to 101.
         for (size_t language_id = 0; language_id < 18; language_id++) {
             auto** language_files = get_language_files(static_cast<uint32_t>(language_id));
             for (ptrdiff_t file_idx = 0; file_idx < file_count; file_idx++) {

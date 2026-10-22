@@ -41,6 +41,7 @@ detect update (build-id) → survey breakage ([SCAN]=0 lines in log.txt)
 | [09-ghidra-project-updates.md](09-ghidra-project-updates.md) | Migrating the Ghidra markup to each new client build. |
 | [10-crash-triage.md](10-crash-triage.md) | `triage_dumps.py`: batch-symbolize + cluster wild crash dumps. |
 | [11-2026-09-30-client-compatibility.md](11-2026-09-30-client-compatibility.md) | Client 38974: loading and tooltip crash evidence, temporary bundled-GWCA compatibility, and regression tests. |
+| [12-2026-10-22-client-compatibility.md](12-2026-10-22-client-compatibility.md) | Client 39108: startup guard repair, executable comparison, skill/map/quest data, native plugin hooks and validation. |
 
 ## Code that will be built (not yet present)
 

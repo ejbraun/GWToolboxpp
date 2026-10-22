@@ -47,3 +47,6 @@
 - Fix an item-tooltip crash when reading salvage materials from the updated item-formula table.
 - Follow the client's updated language-file table size when exporting decoded string files from the Info window.
 - Retry checked SST skill, movement, NPC-interaction and minipet actions once after failure, including actions inside conditional or random blocks, and cancel superseded queued requests.
+
+## v9 - 2026-10-22
+- Fixed build compatibility bug.
